@@ -4,7 +4,7 @@ const { register, login, me } = require('../controllers/auth.controller');
 const {
   getUsers, getUser, approveUser, rejectUser, suspendUser, reactivateUser, updateUser,
   getRoles, getPermissions, getRolePermissions, updateRolePermissions,
-  getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs,
+  getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs, getTeam,
 } = require('../controllers/users.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { getLeads, createLead, updateLead, getAppointments, updateAppointment, getAssignments, setAssignment } = require('../controllers/leads.controller');
@@ -22,6 +22,7 @@ router.get('/notifications', requireAuth, getNotifications);
 router.patch('/notifications/:id/read', requireAuth, markNotificationRead);
 router.patch('/notifications/read-all', requireAuth, markAllNotificationsRead);
 
+router.get('/users/team', requireAuth, getTeam);
 router.get('/users', requireAuth, requireOwner, getUsers);
 router.get('/users/:id', requireAuth, requireOwner, getUser);
 router.patch('/users/:id', requireAuth, requireOwner, updateUser);
@@ -37,14 +38,12 @@ router.put('/roles/:roleId/permissions', requireAuth, requireOwner, updateRolePe
 
 router.get('/audit-logs', requireAuth, requireOwner, getAuditLogs);
 
-// Leads & Appointments
 router.get('/leads', requireAuth, getLeads);
 router.post('/leads', requireAuth, createLead);
 router.patch('/leads/:id', requireAuth, updateLead);
 router.get('/appointments', requireAuth, getAppointments);
 router.patch('/appointments/:id', requireAuth, updateAppointment);
 
-// Setter-closer assignments
 router.get('/assignments', requireAuth, getAssignments);
 router.put('/assignments', requireAuth, requireOwner, setAssignment);
 
