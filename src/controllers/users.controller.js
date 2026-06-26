@@ -31,20 +31,13 @@ function approveUser(req, res) {
   const { roleId } = req.body;
   const u = get('SELECT * FROM users WHERE id = ?', [id]);
   if (!u) return res.status(404).json({ error: 'User not found.' });
-
-  // Use provided role or fall back to requested role
   const targetRoleId = roleId || u.requested_role_id || 2;
   run('UPDATE users SET status = ?, role_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
     ['active', targetRoleId, id]);
-
-  // Notify the user
   run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)',
     [uuid(), id, 'Your account has been approved! You can now log in.']);
-
-  // Audit
   run('INSERT INTO audit_logs (id, actor_id, action, target_id, details) VALUES (?, ?, ?, ?, ?)',
     [uuid(), req.user.id, 'approve_user', id, JSON.stringify({ roleId: targetRoleId })]);
-
   return res.json({ message: 'User approved.' });
 }
 
@@ -122,8 +115,20 @@ function getAuditLogs(req, res) {
   return res.json(logs);
 }
 
+function getTeam(req, res) {
+  const users = query(
+    `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.status,
+      r.name as role
+     FROM users u
+     LEFT JOIN roles r ON u.role_id = r.id
+     WHERE u.status = 'active'
+     ORDER BY r.name, u.first_name`
+  );
+  return res.json(users);
+}
+
 module.exports = {
   getUsers, getUser, approveUser, rejectUser, suspendUser, reactivateUser, updateUser,
   getRoles, getPermissions, getRolePermissions, updateRolePermissions,
-  getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs,
+  getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs, getTeam,
 };
