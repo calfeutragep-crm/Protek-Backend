@@ -7,6 +7,7 @@ const {
   getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs,
 } = require('../controllers/users.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
+const { getLeads, createLead, updateLead, getAppointments, updateAppointment, getAssignments, setAssignment } = require('../controllers/leads.controller');
 
 const router = express.Router();
 
@@ -35,5 +36,16 @@ router.get('/roles/:roleId/permissions', requireAuth, requireOwner, getRolePermi
 router.put('/roles/:roleId/permissions', requireAuth, requireOwner, updateRolePermissions);
 
 router.get('/audit-logs', requireAuth, requireOwner, getAuditLogs);
+
+// Leads & Appointments
+router.get('/leads', requireAuth, getLeads);
+router.post('/leads', requireAuth, createLead);
+router.patch('/leads/:id', requireAuth, updateLead);
+router.get('/appointments', requireAuth, getAppointments);
+router.patch('/appointments/:id', requireAuth, updateAppointment);
+
+// Setter-closer assignments
+router.get('/assignments', requireAuth, getAssignments);
+router.put('/assignments', requireAuth, requireOwner, setAssignment);
 
 module.exports = router;
