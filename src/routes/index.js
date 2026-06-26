@@ -8,6 +8,7 @@ const {
 } = require('../controllers/users.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { getLeads, createLead, updateLead, getAppointments, updateAppointment, getAssignments, setAssignment } = require('../controllers/leads.controller');
+const { createDeal, getDeals, updateDeal } = require('../controllers/deals.controller');
 
 const router = express.Router();
 
@@ -46,5 +47,9 @@ router.patch('/appointments/:id', requireAuth, updateAppointment);
 
 router.get('/assignments', requireAuth, getAssignments);
 router.put('/assignments', requireAuth, requireOwner, setAssignment);
+
+router.get('/deals', requireAuth, getDeals);
+router.post('/deals', requireAuth, createDeal);
+router.patch('/deals/:id', requireAuth, updateDeal);
 
 module.exports = router;
