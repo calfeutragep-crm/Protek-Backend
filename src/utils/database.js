@@ -11,11 +11,9 @@ async function initDb() {
     SQL = await require('sql.js')();
   }
 
-  // Ensure data dir exists
   const dataDir = path.dirname(DB_PATH);
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-  // Load or create DB
   if (fs.existsSync(DB_PATH)) {
     const fileBuffer = fs.readFileSync(DB_PATH);
     db = new SQL.Database(fileBuffer);
@@ -75,6 +73,50 @@ function createSchema() {
       target_id TEXT,
       details TEXT,
       created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS setter_assignments (
+      setter_id TEXT PRIMARY KEY,
+      closer_id TEXT NOT NULL,
+      assigned_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(setter_id) REFERENCES users(id),
+      FOREIGN KEY(closer_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS leads (
+      id TEXT PRIMARY KEY,
+      first_name TEXT NOT NULL,
+      last_name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      city TEXT,
+      postal TEXT,
+      notes TEXT,
+      setter_id TEXT,
+      closer_id TEXT,
+      status TEXT DEFAULT 'Scheduled',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS appointments (
+      id TEXT PRIMARY KEY,
+      lead_id TEXT,
+      name TEXT NOT NULL,
+      phone TEXT,
+      address TEXT,
+      setter_id TEXT,
+      setter_name TEXT,
+      closer_id TEXT,
+      closer_name TEXT,
+      appt_date TEXT,
+      appt_hour INTEGER,
+      status TEXT DEFAULT 'Scheduled',
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(lead_id) REFERENCES leads(id)
     );
   `);
   saveDb();
