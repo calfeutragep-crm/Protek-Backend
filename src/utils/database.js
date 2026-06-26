@@ -118,6 +118,39 @@ function createSchema() {
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(lead_id) REFERENCES leads(id)
     );
+
+    CREATE TABLE IF NOT EXISTS deals (
+      id TEXT PRIMARY KEY,
+      appointment_id TEXT,
+      closer_id TEXT,
+      client_name TEXT NOT NULL,
+      address TEXT,
+      phone TEXT,
+      email TEXT,
+      price REAL,
+      payment_method TEXT,
+      footage_total REAL,
+      footage_white REAL DEFAULT 0,
+      footage_black REAL DEFAULT 0,
+      footage_wheat REAL DEFAULT 0,
+      footage_other TEXT,
+      ladder_height TEXT,
+      install_date TEXT,
+      notes TEXT,
+      work_front TEXT,
+      work_right TEXT,
+      work_left TEXT,
+      work_rear TEXT,
+      color_white TEXT,
+      color_black TEXT,
+      color_wheat TEXT,
+      color_other TEXT,
+      photos TEXT,
+      status TEXT DEFAULT 'Pending Installation',
+      tech_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
   `);
   saveDb();
 }
