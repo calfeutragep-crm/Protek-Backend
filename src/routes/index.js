@@ -84,13 +84,7 @@ router.get   ('/notifications',          requireAuth, getNotifications);
 router.patch ('/notifications/:id/read', requireAuth, markNotificationRead);
 router.patch ('/notifications/read-all', requireAuth, markAllNotificationsRead);
 
-router.get  ('/users',                requireAuth, requireOwner, getUsers);
-router.get  ('/users/:id',            requireAuth, requireOwner, getUser);
-router.patch('/users/:id',            requireAuth, requireOwner, updateUser);
-router.post ('/users/:id/approve',    requireAuth, requireOwner, approveUser);
-router.post ('/users/:id/reject',     requireAuth, requireOwner, rejectUser);
-router.post ('/users/:id/suspend',    requireAuth, requireOwner, suspendUser);
-router.post ('/users/:id/reactivate', requireAuth, requireOwner, reactivateUser);
+router.get  ('/users',   requireAuth, requireOwner, getUsers);
 
 router.get('/users/team', requireAuth, (req, res) => {
   const rows = query(
@@ -101,6 +95,13 @@ router.get('/users/team', requireAuth, (req, res) => {
   );
   return res.json(rows);
 });
+
+router.get  ('/users/:id',            requireAuth, requireOwner, getUser);
+router.patch('/users/:id',            requireAuth, requireOwner, updateUser);
+router.post ('/users/:id/approve',    requireAuth, requireOwner, approveUser);
+router.post ('/users/:id/reject',     requireAuth, requireOwner, rejectUser);
+router.post ('/users/:id/suspend',    requireAuth, requireOwner, suspendUser);
+router.post ('/users/:id/reactivate', requireAuth, requireOwner, reactivateUser);
 
 router.get('/roles',                      requireAuth, getRoles);
 router.get('/permissions',                requireAuth, requireOwner, getPermissions);
