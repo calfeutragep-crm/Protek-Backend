@@ -52,7 +52,6 @@ function requireManagerOrOwner(req, res, next) {
   }
   next();
 }
-
 function requireTicketAccess(req, res, next) {
   const r = req.user.role;
   if (r !== 'owner' && r !== 'manager' && r !== 'tech') {
@@ -233,17 +232,17 @@ router.post('/deals', requireAuth, (req, res) => {
   const {
     appointmentId, clientName, address, phone, email,
     price, paymentMethod,
-    footageTotal, footageWhite, footageBlack, footageWheat, footageOther,
+    footageTotal, footageOther,
     ladderHeight, installDate,
     workFront, workRight, workLeft, workRear,
-    colorWhite, colorBlack, colorWheat, colorOther,
     notes, photoUrls,
+    closerIdOverride, setterIdOverride,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
   const dealId = uuid();
-  const closerId = req.user.role === 'closer' ? req.user.id : null;
-  let setterId = null;
-  if (appointmentId) {
+  const closerId = closerIdOverride || (req.user.role === 'closer' ? req.user.id : null);
+  let setterId = setterIdOverride || null;
+  if (!setterId && appointmentId) {
     const appt = get('SELECT setter_id FROM appointments WHERE id = ?', [appointmentId]);
     if (appt) setterId = appt.setter_id;
   }
@@ -253,21 +252,19 @@ router.post('/deals', requireAuth, (req, res) => {
        id, appointment_id, closer_id, setter_id,
        client_name, address, phone, email,
        price, payment_method,
-       footage_total, footage_white, footage_black, footage_wheat, footage_other,
+       footage_total, footage_other,
        ladder_height, install_date,
        work_front, work_right, work_left, work_rear,
-       color_white, color_black, color_wheat, color_other,
        notes, photo_urls, status
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dealId, appointmentId || null, closerId, setterId,
       clientName, address || null, phone || null, email || null,
       parseFloat(price) || 0, paymentMethod || null,
-      parseFloat(footageTotal) || 0, parseFloat(footageWhite) || 0,
-      parseFloat(footageBlack) || 0, parseFloat(footageWheat) || 0,
-      footageOther || null, ladderHeight || null, installDate || null,
+      parseFloat(footageTotal) || 0,
+      footageOther || null,
+      ladderHeight || null, installDate || null,
       workFront || null, workRight || null, workLeft || null, workRear || null,
-      colorWhite || null, colorBlack || null, colorWheat || null, colorOther || null,
       notes || null, photoUrlsJson, 'Pending Installation',
     ]
   );
