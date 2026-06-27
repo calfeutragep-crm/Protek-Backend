@@ -52,6 +52,7 @@ function requireManagerOrOwner(req, res, next) {
   }
   next();
 }
+
 function requireTicketAccess(req, res, next) {
   const r = req.user.role;
   if (r !== 'owner' && r !== 'manager' && r !== 'tech') {
@@ -192,7 +193,7 @@ router.patch('/appointments/:id', requireAuth, (req, res) => {
   if (!appt) return res.status(404).json({ error: 'Appointment not found.' });
   const sets = [];
   const params = [];
-  if (status !== undefined)  { sets.push('status = ?');    params.push(status); }
+  if (status !== undefined)   { sets.push('status = ?');    params.push(status); }
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate); }
   if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(parseInt(apptHour)); }
   if (sets.length) {
@@ -357,3 +358,10 @@ router.get('/poll', requireAuth, (req, res) => {
   );
   return res.json({
     newTickets,
+    updatedJobs,
+    unreadNotifications: unreadCount ? unreadCount.c : 0,
+    serverTime: new Date().toISOString(),
+  });
+});
+
+module.exports = router;
