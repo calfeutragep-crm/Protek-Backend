@@ -16,6 +16,7 @@ async function initDb() {
     db = new SQL.Database();
   }
   createSchema();
+  migrateNewColumns();
   seedRoles();
   return db;
 }
@@ -133,12 +134,23 @@ function createSchema() {
       photo_urls TEXT DEFAULT '[]',
       status TEXT DEFAULT 'Pending Installation',
       tech_id TEXT,
+      obstacles_to_remove TEXT,
+      tools_needed TEXT,
+      tools_notes TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(appointment_id) REFERENCES appointments(id),
       FOREIGN KEY(closer_id) REFERENCES users(id),
       FOREIGN KEY(setter_id) REFERENCES users(id),
       FOREIGN KEY(tech_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      sender_id TEXT,
+      type TEXT NOT NULL DEFAULT 'user',
+      body TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(sender_id) REFERENCES users(id)
     );
     CREATE TABLE IF NOT EXISTS installation_tickets (
       id TEXT PRIMARY KEY,
@@ -170,6 +182,9 @@ function createSchema() {
       scheduled_install_date TEXT,
       tech_id TEXT,
       status TEXT DEFAULT 'New',
+      obstacles_to_remove TEXT,
+      tools_needed TEXT,
+      tools_notes TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(deal_id) REFERENCES deals(id),
@@ -180,6 +195,35 @@ function createSchema() {
     );
   `);
   saveDb();
+}
+
+// --- Migration : ajoute les colonnes manquantes sur une base déjà existante ---
+// "CREATE TABLE IF NOT EXISTS" ne modifie pas une table qui existe déjà en prod,
+// donc on vérifie/ajoute les nouvelles colonnes ici à chaque démarrage (idempotent).
+function columnExists(table, column) {
+  const res = db.exec(`PRAGMA table_info(${table})`);
+  if (!res[0]) return false;
+  return res[0].values.some(row => row[1] === column);
+}
+
+function migrateNewColumns() {
+  const migrations = [
+    { table: 'deals',                column: 'obstacles_to_remove', def: 'TEXT' },
+    { table: 'deals',                column: 'tools_needed',        def: 'TEXT' },
+    { table: 'deals',                column: 'tools_notes',         def: 'TEXT' },
+    { table: 'installation_tickets', column: 'obstacles_to_remove', def: 'TEXT' },
+    { table: 'installation_tickets', column: 'tools_needed',        def: 'TEXT' },
+    { table: 'installation_tickets', column: 'tools_notes',         def: 'TEXT' },
+  ];
+  let changed = false;
+  migrations.forEach(({ table, column, def }) => {
+    if (!columnExists(table, column)) {
+      db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+      console.log(`✓ Migration: colonne ajoutée ${table}.${column}`);
+      changed = true;
+    }
+  });
+  if (changed) saveDb();
 }
 
 function seedRoles() {
