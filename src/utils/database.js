@@ -149,6 +149,7 @@ function createSchema() {
       sender_id TEXT,
       type TEXT NOT NULL DEFAULT 'user',
       body TEXT NOT NULL,
+      image_url TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(sender_id) REFERENCES users(id)
     );
@@ -214,6 +215,7 @@ function migrateNewColumns() {
     { table: 'installation_tickets', column: 'obstacles_to_remove', def: 'TEXT' },
     { table: 'installation_tickets', column: 'tools_needed',        def: 'TEXT' },
     { table: 'installation_tickets', column: 'tools_notes',         def: 'TEXT' },
+    { table: 'chat_messages',        column: 'image_url',           def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
