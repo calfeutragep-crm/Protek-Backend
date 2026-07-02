@@ -11,6 +11,7 @@ const {
   getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs,
 } = require('../controllers/users.controller');
 const { getTickets, getTicket, updateTicket, createTicketFromDeal, syncTicketFromDeal } = require('../controllers/tickets.controller');
+const { getChatMessages, postChatMessage, postSystemMessage } = require('../controllers/chat.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
 
@@ -56,6 +57,13 @@ function requireTicketAccess(req, res, next) {
   const r = req.user.role;
   if (r !== 'owner' && r !== 'manager' && r !== 'tech') {
     return res.status(403).json({ error: 'Access denied.' });
+  }
+  next();
+}
+function requireChatAccess(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'setter' && r !== 'closer') {
+    return res.status(403).json({ error: 'Chat access restricted to setters, closers, and owner.' });
   }
   next();
 }
@@ -158,6 +166,8 @@ router.post('/leads', requireAuth, (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
       [apptId, leadId, setterId, closerId || null, apptDate, parseInt(apptHour) || 14, notes || null]
     );
+    // Notification chat — aucune donnee client, juste le compteur attribue au setter.
+    postSystemMessage(`📅 +1 rendez-vous — ${req.user.first_name} ${req.user.last_name}`);
     if (closerId) {
       const setter = get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]);
       const setterName = setter ? `${setter.first_name} ${setter.last_name}` : 'Un setter';
@@ -238,6 +248,7 @@ router.post('/deals', requireAuth, (req, res) => {
     workFront, workRight, workLeft, workRear,
     notes, photoUrls,
     closerIdOverride, setterIdOverride,
+    obstaclesToRemove, toolsNeeded, toolsNotes,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
   const dealId = uuid();
@@ -256,8 +267,9 @@ router.post('/deals', requireAuth, (req, res) => {
        footage_total, footage_other,
        ladder_height, install_date,
        work_front, work_right, work_left, work_rear,
-       notes, photo_urls, status
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       notes, photo_urls, status,
+       obstacles_to_remove, tools_needed, tools_notes
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dealId, appointmentId || null, closerId, setterId,
       clientName, address || null, phone || null, email || null,
@@ -267,10 +279,18 @@ router.post('/deals', requireAuth, (req, res) => {
       ladderHeight || null, installDate || null,
       workFront || null, workRight || null, workLeft || null, workRear || null,
       notes || null, photoUrlsJson, 'Pending Installation',
+      obstaclesToRemove || null, toolsNeeded || null, toolsNotes || null,
     ]
   );
   const newDeal = get('SELECT * FROM deals WHERE id = ?', [dealId]);
   if (newDeal) createTicketFromDeal(newDeal);
+  // Notification chat — aucune donnee client (pas de nom, prix, ou photo), juste
+  // le compteur attribue au closer, avec le setter qui a pris le rendez-vous d'origine.
+  const closerUser = closerId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [closerId]) : null;
+  const setterUser = setterId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]) : null;
+  const closerName = closerUser ? `${closerUser.first_name} ${closerUser.last_name}` : 'Closer inconnu';
+  const setterName = setterUser ? `${setterUser.first_name} ${setterUser.last_name}` : null;
+  postSystemMessage(`💰 +1 deal — ${closerName}` + (setterName ? ` (RDV pris par ${setterName})` : ''));
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
 
@@ -311,6 +331,9 @@ router.get  ('/tickets',     requireAuth, requireTicketAccess,   getTickets);
 router.get  ('/tickets/:id', requireAuth, requireTicketAccess,   getTicket);
 router.patch('/tickets/:id', requireAuth, requireManagerOrOwner, updateTicket);
 
+router.get ('/chat/messages', requireAuth, requireChatAccess, getChatMessages);
+router.post('/chat/messages', requireAuth, requireChatAccess, postChatMessage);
+
 router.get('/poll', requireAuth, (req, res) => {
   const since = req.query.since || new Date(Date.now() - 30000).toISOString();
   const role = req.user.role;
@@ -350,6 +373,20 @@ router.get('/poll', requireAuth, (req, res) => {
       try { t.photo_urls = JSON.parse(t.photo_urls || '[]'); } catch { t.photo_urls = []; }
     });
   }
+  let newChatMessages = [];
+  if (role === 'owner' || role === 'setter' || role === 'closer') {
+    newChatMessages = query(
+      `SELECT m.*,
+         u.first_name AS sender_first_name, u.last_name AS sender_last_name,
+         r.name AS sender_role
+       FROM chat_messages m
+       LEFT JOIN users u ON m.sender_id = u.id
+       LEFT JOIN roles r ON u.role_id = r.id
+       WHERE m.created_at > ?
+       ORDER BY m.created_at ASC`,
+      [since]
+    );
+  }
   const unreadCount = get(
     'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0',
     [req.user.id]
@@ -357,6 +394,7 @@ router.get('/poll', requireAuth, (req, res) => {
   return res.json({
     newTickets,
     updatedJobs,
+    newChatMessages,
     unreadNotifications: unreadCount ? unreadCount.c : 0,
     serverTime: new Date().toISOString(),
   });
