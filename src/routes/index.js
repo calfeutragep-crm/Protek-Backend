@@ -77,8 +77,9 @@ router.post('/upload', requireAuth, upload.array('photos', 10), async (req, res)
     return res.status(400).json({ error: 'No files uploaded.' });
   }
   try {
+    const folder = (req.body && req.body.folder) || 'deals';
     const uploads = await Promise.all(
-      req.files.map(f => uploadToCloudinary(f.buffer, f.originalname, 'deals'))
+      req.files.map(f => uploadToCloudinary(f.buffer, f.originalname, folder))
     );
     const urls = uploads.map(u => ({ url: u.secure_url, public_id: u.public_id, type: u.resource_type }));
     return res.json({ urls });
