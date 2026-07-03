@@ -17,6 +17,7 @@ const {
 } = require('../controllers/chat.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
+const { sendEmail } = require('../utils/email');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -60,6 +61,32 @@ function requireTicketAccess(req, res, next) {
   const r = req.user.role;
   if (r !== 'owner' && r !== 'manager' && r !== 'tech') {
     return res.status(403).json({ error: 'Access denied.' });
+  }
+  next();
+}
+// Le "Leads CRM" (Facebook/Instagram/Google Ads) est une section entierement separee du CRM
+// porte-a-porte : seuls owner, lead_marketing et lead_closer y ont acces. Les roles porte-a-porte
+// (setter/closer/manager/tech) sont explicitement bloques par requireD2DOnly ci-dessous, et
+// symetriquement les roles leads-CRM sont bloques des routes porte-a-porte qui n'avaient pas
+// deja de restriction de role.
+function requireLeadsCrmAccess(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'lead_marketing' && r !== 'lead_closer') {
+    return res.status(403).json({ error: 'Access restricted to the Leads CRM team.' });
+  }
+  next();
+}
+function requireLeadsCrmCloser(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'lead_closer') {
+    return res.status(403).json({ error: 'Lead closer or owner access required.' });
+  }
+  next();
+}
+function requireD2DOnly(req, res, next) {
+  const r = req.user.role;
+  if (r === 'lead_marketing' || r === 'lead_closer') {
+    return res.status(403).json({ error: 'This section is not part of the Leads CRM.' });
   }
   next();
 }
@@ -121,14 +148,14 @@ router.get('/roles/:roleId/permissions',  requireAuth, requireOwner, getRolePerm
 router.put('/roles/:roleId/permissions',  requireAuth, requireOwner, updateRolePermissions);
 router.get('/audit-logs',                 requireAuth, requireOwner, getAuditLogs);
 
-router.get('/assignments', requireAuth, (req, res) => {
+router.get('/assignments', requireAuth, requireD2DOnly, (req, res) => {
   const rows = query('SELECT setter_id, closer_id FROM assignments');
   const map = {};
   rows.forEach(r => { map[r.setter_id] = r.closer_id; });
   return res.json(map);
 });
 
-router.put('/assignments', requireAuth, (req, res) => {
+router.put('/assignments', requireAuth, requireD2DOnly, (req, res) => {
   const { setterId, closerId } = req.body;
   if (!setterId) return res.status(400).json({ error: 'setterId required.' });
   run(
@@ -138,7 +165,7 @@ router.put('/assignments', requireAuth, (req, res) => {
   return res.json({ message: 'Assignment saved.' });
 });
 
-router.get('/leads', requireAuth, (req, res) => {
+router.get('/leads', requireAuth, requireD2DOnly, (req, res) => {
   const rows = query(
     `SELECT l.*,
        s.first_name || ' ' || s.last_name AS setter_name_full,
@@ -151,7 +178,7 @@ router.get('/leads', requireAuth, (req, res) => {
   return res.json(rows);
 });
 
-router.post('/leads', requireAuth, (req, res) => {
+router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
   const { firstName, lastName, phone, email, address, city, postal, notes, closerId, apptDate, apptHour } = req.body;
   if (!firstName || !lastName || !phone) {
     return res.status(400).json({ error: 'firstName, lastName, phone required.' });
@@ -184,7 +211,7 @@ router.post('/leads', requireAuth, (req, res) => {
   return res.status(201).json({ message: 'Lead created.', id: leadId });
 });
 
-router.get('/appointments', requireAuth, (req, res) => {
+router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
   const rows = query(
     `SELECT a.*,
        l.first_name || ' ' || l.last_name AS name,
@@ -200,7 +227,7 @@ router.get('/appointments', requireAuth, (req, res) => {
   return res.json(rows);
 });
 
-router.patch('/appointments/:id', requireAuth, (req, res) => {
+router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
   const { status, apptDate, apptHour } = req.body;
   const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
@@ -253,10 +280,11 @@ router.post('/deals', requireAuth, (req, res) => {
     notes, photoUrls,
     closerIdOverride, setterIdOverride,
     obstaclesToRemove, toolsNeeded, toolsNotes,
+    adLeadId,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
   const dealId = uuid();
-  const closerId = closerIdOverride || (req.user.role === 'closer' ? req.user.id : null);
+  const closerId = closerIdOverride || (['closer', 'lead_closer'].includes(req.user.role) ? req.user.id : null);
   let setterId = setterIdOverride || null;
   if (!setterId && appointmentId) {
     const appt = get('SELECT setter_id FROM appointments WHERE id = ?', [appointmentId]);
@@ -272,8 +300,8 @@ router.post('/deals', requireAuth, (req, res) => {
        ladder_height, install_date,
        work_front, work_right, work_left, work_rear,
        notes, photo_urls, status,
-       obstacles_to_remove, tools_needed, tools_notes
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       obstacles_to_remove, tools_needed, tools_notes, ad_lead_id
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dealId, appointmentId || null, closerId, setterId,
       clientName, address || null, phone || null, email || null,
@@ -284,17 +312,24 @@ router.post('/deals', requireAuth, (req, res) => {
       workFront || null, workRight || null, workLeft || null, workRear || null,
       notes || null, photoUrlsJson, 'Pending Installation',
       obstaclesToRemove || null, toolsNeeded || null, toolsNotes || null,
+      adLeadId || null,
     ]
   );
   const newDeal = get('SELECT * FROM deals WHERE id = ?', [dealId]);
   if (newDeal) createTicketFromDeal(newDeal);
+  if (adLeadId) {
+    run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [adLeadId]);
+  }
   // Notification chat — aucune donnee client (pas de nom, prix, ou photo), juste
   // le compteur attribue au closer, avec le setter qui a pris le rendez-vous d'origine.
-  const closerUser = closerId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [closerId]) : null;
-  const setterUser = setterId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]) : null;
-  const closerName = closerUser ? `${closerUser.first_name} ${closerUser.last_name}` : 'Closer inconnu';
-  const setterName = setterUser ? `${setterUser.first_name} ${setterUser.last_name}` : null;
-  postSystemMessage(`💰 +1 deal — ${closerName}` + (setterName ? ` (RDV pris par ${setterName})` : ''));
+  // (Les deals issus du Leads CRM ne postent pas dans le chat porte-a-porte — sections isolees.)
+  if (!adLeadId) {
+    const closerUser = closerId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [closerId]) : null;
+    const setterUser = setterId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]) : null;
+    const closerName = closerUser ? `${closerUser.first_name} ${closerUser.last_name}` : 'Closer inconnu';
+    const setterName = setterUser ? `${setterUser.first_name} ${setterUser.last_name}` : null;
+    postSystemMessage(`💰 +1 deal — ${closerName}` + (setterName ? ` (RDV pris par ${setterName})` : ''));
+  }
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
 
@@ -341,6 +376,135 @@ router.post('/chat/channels', requireAuth, requireOwner,      createChatChannel)
 router.get  ('/chat/messages',        requireAuth, requireChatAccess, getChatMessages);
 router.post ('/chat/messages',        requireAuth, requireChatAccess, postChatMessage);
 router.patch('/chat/messages/:id/cost', requireAuth, requireOwner,    setCostRequestPrice);
+
+// ═══════════════════════════════════════════
+// LEADS CRM — section isolee pour les leads Facebook / Instagram / Google Ads.
+// Acces strictement limite a owner, lead_marketing et lead_closer (requireLeadsCrmAccess).
+// ═══════════════════════════════════════════
+
+// Le lead closer (ou owner) choisit ou l'email de notification "nouveau lead" doit etre envoye.
+router.patch('/auth/notify-prefs', requireAuth, (req, res) => {
+  const { notifyEmail, notifyPhone } = req.body;
+  const sets = []; const params = [];
+  if (notifyEmail !== undefined) { sets.push('notify_email = ?'); params.push(notifyEmail || null); }
+  if (notifyPhone !== undefined) { sets.push('notify_phone = ?'); params.push(notifyPhone || null); }
+  if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
+  params.push(req.user.id);
+  run(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params);
+  return res.json({ message: 'Preferences updated.' });
+});
+
+router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const rows = query(
+    `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
+     FROM ad_leads l
+     LEFT JOIN users c ON l.closer_id = c.id
+     ORDER BY l.created_at DESC`
+  );
+  return res.json(rows);
+});
+
+router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
+  const { source, firstName, lastName, phone, email, notes } = req.body;
+  if (!firstName || !lastName || !phone) {
+    return res.status(400).json({ error: 'firstName, lastName, phone required.' });
+  }
+  const id = uuid();
+  run(
+    `INSERT INTO ad_leads (id, source, first_name, last_name, phone, email, notes, status, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)`,
+    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, req.user.id]
+  );
+  // Notifie tous les lead closers actifs (best-effort — n'echoue jamais la creation du lead).
+  const closers = query(
+    `SELECT u.id, u.first_name, u.email, u.notify_email FROM users u
+     JOIN roles r ON u.role_id = r.id
+     WHERE r.name = 'lead_closer' AND u.status = 'active'`
+  );
+  closers.forEach(c => {
+    run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [
+      uuid(), c.id, `🆕 Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
+    ]);
+    const to = c.notify_email || c.email;
+    sendEmail({
+      to,
+      subject: `Nouveau lead ${source || ''} — ${firstName} ${lastName}`,
+      text: `Un nouveau lead vient d'arriver dans la queue.\n\nSource: ${source || 'Autre'}\nNom: ${firstName} ${lastName}\nTelephone: ${phone}\nEmail: ${email || '—'}\nNotes: ${notes || '—'}\n\nConnectez-vous au Leads CRM pour le prendre en charge.`,
+    }).catch(() => {});
+  });
+  return res.status(201).json({ message: 'Lead created.', id });
+});
+
+router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const { id } = req.params;
+  const { status, claim, apptDate, apptHour, notes } = req.body;
+  const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+  const sets = ["updated_at = datetime('now')"];
+  const params = [];
+
+  if (claim) { sets.push('closer_id = ?'); params.push(req.user.role === 'owner' ? (req.body.closerId || req.user.id) : req.user.id); }
+  if (!lead.contacted_at && (status === 'Contacted' || apptDate)) {
+    sets.push('contacted_at = ?'); params.push(new Date().toISOString());
+  }
+  if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate || null); }
+  if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseInt(apptHour) : null); }
+  if (notes !== undefined) { sets.push('notes = ?'); params.push(notes || null); }
+  const TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show'];
+  if (status) {
+    sets.push('status = ?'); params.push(status);
+  } else if (apptDate && !TERMINAL_STATUSES.includes(lead.status)) {
+    // Fixer une date de rendez-vous fait toujours progresser le lead vers "Appointment Set",
+    // qu'il vienne de "New" ou de "Contacted" — sauf s'il est deja dans un etat final.
+    sets.push('status = ?'); params.push('Appointment Set');
+  }
+
+  params.push(id);
+  run(`UPDATE ad_leads SET ${sets.join(', ')} WHERE id = ?`, params);
+  return res.json({ message: 'Lead updated.' });
+});
+
+router.get('/leads-crm/cost-requests', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const rows = query(
+    `SELECT cr.*, c.first_name || ' ' || c.last_name AS closer_name
+     FROM ad_lead_cost_requests cr
+     LEFT JOIN users c ON cr.closer_id = c.id
+     ORDER BY cr.created_at DESC`
+  );
+  rows.forEach(r => { try { r.photo_urls = JSON.parse(r.photo_urls || '[]'); } catch { r.photo_urls = []; } });
+  return res.json(rows);
+});
+
+router.post('/leads-crm/cost-requests', requireAuth, requireLeadsCrmCloser, (req, res) => {
+  const { adLeadId, clientName, footageTotal, ladderType, toolsNeeded, obstaclesToRemove, photoUrls } = req.body;
+  if (!clientName) return res.status(400).json({ error: 'clientName required.' });
+  const id = uuid();
+  const urls = Array.isArray(photoUrls) ? photoUrls : [];
+  run(
+    `INSERT INTO ad_lead_cost_requests (
+      id, ad_lead_id, closer_id, client_name, footage_total, ladder_type,
+      tools_needed, obstacles_to_remove, photo_urls, cost_status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+    [
+      id, adLeadId || null, req.user.id, clientName,
+      footageTotal ? String(footageTotal) : null, ladderType || null,
+      toolsNeeded || null, obstaclesToRemove || null, JSON.stringify(urls),
+    ]
+  );
+  return res.status(201).json({ message: 'Cost request sent.', id });
+});
+
+router.patch('/leads-crm/cost-requests/:id/cost', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const { cost } = req.body;
+  const parsed = parseFloat(cost);
+  if (!parsed || parsed <= 0) return res.status(400).json({ error: 'Valid cost required.' });
+  const cr = get('SELECT id FROM ad_lead_cost_requests WHERE id = ?', [id]);
+  if (!cr) return res.status(404).json({ error: 'Cost request not found.' });
+  run(`UPDATE ad_lead_cost_requests SET cost = ?, cost_status = 'priced', updated_at = datetime('now') WHERE id = ?`, [parsed, id]);
+  return res.json({ message: 'Cost updated.' });
+});
 
 router.get('/poll', requireAuth, (req, res) => {
   const since = req.query.since || new Date(Date.now() - 30000).toISOString();
@@ -398,6 +562,29 @@ router.get('/poll', requireAuth, (req, res) => {
       try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
     });
   }
+  let newAdLeads = [];
+  let newAdLeadCostRequests = [];
+  if (role === 'owner' || role === 'lead_marketing' || role === 'lead_closer') {
+    newAdLeads = query(
+      `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
+       FROM ad_leads l
+       LEFT JOIN users c ON l.closer_id = c.id
+       WHERE l.updated_at > ?
+       ORDER BY l.created_at DESC`,
+      [since]
+    );
+    newAdLeadCostRequests = query(
+      `SELECT cr.*, c.first_name || ' ' || c.last_name AS closer_name
+       FROM ad_lead_cost_requests cr
+       LEFT JOIN users c ON cr.closer_id = c.id
+       WHERE cr.updated_at > ?
+       ORDER BY cr.created_at DESC`,
+      [since]
+    );
+    newAdLeadCostRequests.forEach(r => {
+      try { r.photo_urls = JSON.parse(r.photo_urls || '[]'); } catch { r.photo_urls = []; }
+    });
+  }
   const unreadCount = get(
     'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0',
     [req.user.id]
@@ -406,6 +593,8 @@ router.get('/poll', requireAuth, (req, res) => {
     newTickets,
     updatedJobs,
     newChatMessages,
+    newAdLeads,
+    newAdLeadCostRequests,
     unreadNotifications: unreadCount ? unreadCount.c : 0,
     serverTime: new Date().toISOString(),
   });
