@@ -147,6 +147,8 @@ function createSchema() {
       setter_id TEXT,
       client_name TEXT,
       address TEXT,
+      city TEXT,
+      postal TEXT,
       phone TEXT,
       email TEXT,
       price REAL,
@@ -251,6 +253,8 @@ function createSchema() {
       setter_id TEXT,
       client_name TEXT NOT NULL,
       address TEXT,
+      city TEXT,
+      postal TEXT,
       phone TEXT,
       email TEXT,
       footage_total REAL,
@@ -319,6 +323,10 @@ function migrateNewColumns() {
     { table: 'users',                column: 'notify_email',        def: 'TEXT' },
     { table: 'users',                column: 'notify_phone',        def: 'TEXT' },
     { table: 'deals',                column: 'ad_lead_id',          def: 'TEXT' },
+    { table: 'deals',                column: 'city',                def: 'TEXT' },
+    { table: 'deals',                column: 'postal',              def: 'TEXT' },
+    { table: 'installation_tickets', column: 'city',                def: 'TEXT' },
+    { table: 'installation_tickets', column: 'postal',              def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
