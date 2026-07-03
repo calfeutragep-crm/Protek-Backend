@@ -17,8 +17,12 @@ async function register(req, res) {
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
 
-    const roleRow = get('SELECT id FROM roles WHERE name = ?', [requestedRole || 'setter']);
-    const roleId = roleRow ? roleRow.id : 2; // default setter
+    // Le role n'est plus choisi par l'utilisateur a l'inscription: l'admin l'assigne
+    // lui-meme au moment de l'approbation (voir approveUser dans users.controller.js).
+    // Le frontend n'envoie plus requestedRole; on garde le support ici en compatibilite
+    // au cas ou un appel externe le fournirait encore, mais on ne defaute plus a 'setter'.
+    const roleRow = requestedRole ? get('SELECT id FROM roles WHERE name = ?', [requestedRole]) : null;
+    const roleId = roleRow ? roleRow.id : null;
 
     const hash = await bcrypt.hash(password, 12);
     const id = uuid();
