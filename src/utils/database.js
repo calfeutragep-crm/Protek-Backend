@@ -159,6 +159,15 @@ function createSchema() {
       type TEXT NOT NULL DEFAULT 'user',
       body TEXT NOT NULL,
       image_url TEXT,
+      appointment_id TEXT,
+      client_name TEXT,
+      footage_total TEXT,
+      ladder_type TEXT,
+      tools_needed TEXT,
+      obstacles_to_remove TEXT,
+      photo_urls TEXT DEFAULT '[]',
+      cost REAL,
+      cost_status TEXT DEFAULT 'pending',
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(sender_id) REFERENCES users(id),
       FOREIGN KEY(channel_id) REFERENCES chat_channels(id)
@@ -227,6 +236,15 @@ function migrateNewColumns() {
     { table: 'installation_tickets', column: 'tools_notes',         def: 'TEXT' },
     { table: 'chat_messages',        column: 'image_url',           def: 'TEXT' },
     { table: 'chat_messages',        column: 'channel_id',          def: 'TEXT' },
+    { table: 'chat_messages',        column: 'appointment_id',      def: 'TEXT' },
+    { table: 'chat_messages',        column: 'client_name',         def: 'TEXT' },
+    { table: 'chat_messages',        column: 'footage_total',       def: 'TEXT' },
+    { table: 'chat_messages',        column: 'ladder_type',         def: 'TEXT' },
+    { table: 'chat_messages',        column: 'tools_needed',        def: 'TEXT' },
+    { table: 'chat_messages',        column: 'obstacles_to_remove', def: 'TEXT' },
+    { table: 'chat_messages',        column: 'photo_urls',          def: "TEXT DEFAULT '[]'" },
+    { table: 'chat_messages',        column: 'cost',                def: 'REAL' },
+    { table: 'chat_messages',        column: 'cost_status',         def: "TEXT DEFAULT 'pending'" },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
