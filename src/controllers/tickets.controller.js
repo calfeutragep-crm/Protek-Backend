@@ -8,18 +8,18 @@ function createTicketFromDeal(deal) {
   run(
     `INSERT INTO installation_tickets (
       id, deal_id, appointment_id, closer_id, setter_id,
-      client_name, address, phone, email,
+      client_name, address, city, postal, phone, email,
       footage_total, footage_white, footage_black, footage_wheat, footage_other,
       ladder_height,
       work_front, work_right, work_left, work_rear,
       color_white, color_black, color_wheat, color_other,
       notes, photo_urls, preferred_install_date, status,
       obstacles_to_remove, tools_needed, tools_notes
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       ticketId, deal.id, deal.appointment_id || null,
       deal.closer_id || null, deal.setter_id || null,
-      deal.client_name, deal.address || null,
+      deal.client_name, deal.address || null, deal.city || null, deal.postal || null,
       deal.phone || null, deal.email || null,
       deal.footage_total || null, deal.footage_white || null,
       deal.footage_black || null, deal.footage_wheat || null,
@@ -55,7 +55,7 @@ function syncTicketFromDeal(deal) {
   if (!ticket) return;
   run(
     `UPDATE installation_tickets SET
-      client_name = ?, address = ?, phone = ?, email = ?,
+      client_name = ?, address = ?, city = ?, postal = ?, phone = ?, email = ?,
       footage_total = ?, footage_white = ?, footage_black = ?,
       footage_wheat = ?, footage_other = ?, ladder_height = ?,
       work_front = ?, work_right = ?, work_left = ?, work_rear = ?,
@@ -65,7 +65,7 @@ function syncTicketFromDeal(deal) {
       updated_at = datetime('now')
     WHERE deal_id = ?`,
     [
-      deal.client_name, deal.address || null,
+      deal.client_name, deal.address || null, deal.city || null, deal.postal || null,
       deal.phone || null, deal.email || null,
       deal.footage_total || null, deal.footage_white || null,
       deal.footage_black || null, deal.footage_wheat || null,
