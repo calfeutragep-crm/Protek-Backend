@@ -13,8 +13,9 @@ function createTicketFromDeal(deal) {
       ladder_height,
       work_front, work_right, work_left, work_rear,
       color_white, color_black, color_wheat, color_other,
-      notes, photo_urls, preferred_install_date, status
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      notes, photo_urls, preferred_install_date, status,
+      obstacles_to_remove, tools_needed, tools_notes
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       ticketId, deal.id, deal.appointment_id || null,
       deal.closer_id || null, deal.setter_id || null,
@@ -31,6 +32,9 @@ function createTicketFromDeal(deal) {
       deal.photo_urls || '[]',
       deal.install_date || null,
       'New',
+      deal.obstacles_to_remove || null,
+      deal.tools_needed || null,
+      deal.tools_notes || null,
     ]
   );
   const managers = query(
@@ -57,6 +61,7 @@ function syncTicketFromDeal(deal) {
       work_front = ?, work_right = ?, work_left = ?, work_rear = ?,
       color_white = ?, color_black = ?, color_wheat = ?, color_other = ?,
       notes = ?, photo_urls = ?, preferred_install_date = ?,
+      obstacles_to_remove = ?, tools_needed = ?, tools_notes = ?,
       updated_at = datetime('now')
     WHERE deal_id = ?`,
     [
@@ -72,6 +77,9 @@ function syncTicketFromDeal(deal) {
       deal.notes || null,
       deal.photo_urls || '[]',
       deal.install_date || null,
+      deal.obstacles_to_remove || null,
+      deal.tools_needed || null,
+      deal.tools_notes || null,
       deal.id,
     ]
   );
@@ -86,15 +94,20 @@ function syncTicketFromDeal(deal) {
 
 function getTickets(req, res) {
   const role = req.user.role;
+  // origin : indique si le job vient du CRM porte-a-porte ou d'un lead marketing (Facebook/
+  // Instagram/Google Ads), pour l'afficher comme petit badge dans la queue du manager et le
+  // calendrier du technicien — le pipeline d'installation lui-meme reste identique.
   let sql = `
     SELECT t.*,
       tech.first_name || ' ' || tech.last_name AS tech_name,
       cl.first_name   || ' ' || cl.last_name   AS closer_name,
-      st.first_name   || ' ' || st.last_name   AS setter_name
+      st.first_name   || ' ' || st.last_name   AS setter_name,
+      CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
     FROM installation_tickets t
     LEFT JOIN users tech ON t.tech_id   = tech.id
     LEFT JOIN users cl   ON t.closer_id = cl.id
     LEFT JOIN users st   ON t.setter_id = st.id
+    LEFT JOIN deals d    ON t.deal_id   = d.id
   `;
   const params = [];
   if (role === 'tech') { sql += ' WHERE t.tech_id = ?'; params.push(req.user.id); }
@@ -111,11 +124,13 @@ function getTicket(req, res) {
     `SELECT t.*,
        tech.first_name || ' ' || tech.last_name AS tech_name,
        cl.first_name   || ' ' || cl.last_name   AS closer_name,
-       st.first_name   || ' ' || st.last_name   AS setter_name
+       st.first_name   || ' ' || st.last_name   AS setter_name,
+       CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
      FROM installation_tickets t
      LEFT JOIN users tech ON t.tech_id   = tech.id
      LEFT JOIN users cl   ON t.closer_id = cl.id
      LEFT JOIN users st   ON t.setter_id = st.id
+     LEFT JOIN deals d    ON t.deal_id   = d.id
      WHERE t.id = ?`,
     [req.params.id]
   );
