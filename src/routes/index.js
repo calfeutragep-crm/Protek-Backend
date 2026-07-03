@@ -98,6 +98,91 @@ function requireChatAccess(req, res, next) {
   next();
 }
 
+// ── Leaderboard hebdomadaire (setters: RDV pris, closers: deals fermes) ──
+// Semaine du lundi 00h00 au dimanche 23h59:59, heure de l'Est (America/Toronto — gere EST/EDT
+// automatiquement). Le classement est calcule A LA VOLEE depuis les tables appointments/deals
+// existantes (aucun compteur stocke separement) : c'est toujours exact, ca "se reinitialise" tout
+// seul des que la semaine change (aucun job de reset a maintenir), et ca reste coherent meme si un
+// RDV/deal est modifie ou re-ouvert. Les deals issus du Leads CRM (ad_lead_id non NULL) ne comptent
+// pas ici — le leaderboard est scope au CRM porte-a-porte, comme le canal Team Rive-Sud lui-meme.
+const LEADERBOARD_TZ = 'America/Toronto';
+
+function tzWallTimeToUTC(y, m, d, h, mi, s, timeZone) {
+  // Convertit une heure "murale" locale (ex: lundi 00:00 heure de l'Est) en instant UTC, sans
+  // dependance externe. On part d'une estimation naive puis on corrige par l'ecart observe —
+  // 2 iterations suffisent car le decalage horaire (EST -05:00 / EDT -04:00) est un nombre
+  // entier d'heures constant sur la journee visee.
+  let guess = Date.UTC(y, m - 1, d, h, mi, s);
+  for (let i = 0; i < 2; i++) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(new Date(guess)).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+    const hh = parts.hour === '24' ? 0 : parseInt(parts.hour, 10);
+    const guessedLocalAsUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, hh, +parts.minute, +parts.second);
+    guess += Date.UTC(y, m - 1, d, h, mi, s) - guessedLocalAsUTC;
+  }
+  return new Date(guess);
+}
+
+function getWeekBoundsUTC(now) {
+  now = now || new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: LEADERBOARD_TZ, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  }).formatToParts(now).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+  const WD = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+  const daysSinceMonday = WD[parts.weekday] != null ? WD[parts.weekday] : 0;
+  // Arithmetique de calendrier (jours entiers) faite a midi UTC pour eviter tout risque de
+  // deborder sur le jour precedent/suivant a cause d'un decalage horaire — insensible au fuseau.
+  const localNoon = new Date(Date.UTC(+parts.year, +parts.month - 1, +parts.day, 12, 0, 0));
+  const monday = new Date(localNoon.getTime() - daysSinceMonday * 86400000);
+  const nextMonday = new Date(monday.getTime() + 7 * 86400000);
+  const weekStart = tzWallTimeToUTC(monday.getUTCFullYear(), monday.getUTCMonth() + 1, monday.getUTCDate(), 0, 0, 0, LEADERBOARD_TZ);
+  const weekEnd = tzWallTimeToUTC(nextMonday.getUTCFullYear(), nextMonday.getUTCMonth() + 1, nextMonday.getUTCDate(), 0, 0, 0, LEADERBOARD_TZ);
+  return { weekStart, weekEnd };
+}
+
+function sqlDateTime(d) { return d.toISOString().slice(0, 19).replace('T', ' '); }
+
+function computeLeaderboard() {
+  const { weekStart, weekEnd } = getWeekBoundsUTC();
+  const startStr = sqlDateTime(weekStart), endStr = sqlDateTime(weekEnd);
+
+  const setterCounts = query(
+    `SELECT setter_id, COUNT(*) AS cnt FROM appointments
+     WHERE setter_id IS NOT NULL AND created_at >= ? AND created_at < ?
+     GROUP BY setter_id`,
+    [startStr, endStr]
+  );
+  const setterCountMap = {};
+  setterCounts.forEach(r => { setterCountMap[r.setter_id] = r.cnt; });
+  const setterUsers = query(
+    `SELECT u.id, u.first_name, u.last_name FROM users u JOIN roles r ON u.role_id = r.id
+     WHERE r.name = 'setter' AND u.status = 'active'`
+  );
+  const setters = setterUsers
+    .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, count: setterCountMap[u.id] || 0 }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const closerCounts = query(
+    `SELECT closer_id, COUNT(*) AS cnt FROM deals
+     WHERE closer_id IS NOT NULL AND ad_lead_id IS NULL AND created_at >= ? AND created_at < ?
+     GROUP BY closer_id`,
+    [startStr, endStr]
+  );
+  const closerCountMap = {};
+  closerCounts.forEach(r => { closerCountMap[r.closer_id] = r.cnt; });
+  const closerUsers = query(
+    `SELECT u.id, u.first_name, u.last_name FROM users u JOIN roles r ON u.role_id = r.id
+     WHERE r.name = 'closer' AND u.status = 'active'`
+  );
+  const closers = closerUsers
+    .map(u => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, count: closerCountMap[u.id] || 0 }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  return { weekStart: weekStart.toISOString(), weekEnd: weekEnd.toISOString(), setters, closers };
+}
+
 router.post('/auth/register', registerLimiter, register);
 router.post('/auth/login',    loginLimiter,    login);
 router.get ('/auth/me',       requireAuth,     me);
@@ -198,7 +283,9 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
       [apptId, leadId, setterId, closerId || null, apptDate, parseInt(apptHour) || 14, notes || null]
     );
     // Notification chat — aucune donnee client, juste le compteur attribue au setter.
-    postSystemMessage(`📅 +1 rendez-vous — ${req.user.first_name} ${req.user.last_name}`);
+    // Ton "hype" volontaire (gras/couleur cote frontend + emojis) pour motiver l'equipe en temps
+    // reel ; voir aussi computeLeaderboard() pour le classement hebdomadaire correspondant.
+    postSystemMessage(`🔥📅 NOUVEAU RDV BOOKÉ !\n${req.user.first_name} ${req.user.last_name} vient de décrocher un rendez-vous — ON CONTINUE COMME ÇA! 💪🚀`);
     if (closerId) {
       const setter = get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]);
       const setterName = setter ? `${setter.first_name} ${setter.last_name}` : 'Un setter';
@@ -328,7 +415,11 @@ router.post('/deals', requireAuth, (req, res) => {
     const setterUser = setterId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]) : null;
     const closerName = closerUser ? `${closerUser.first_name} ${closerUser.last_name}` : 'Closer inconnu';
     const setterName = setterUser ? `${setterUser.first_name} ${setterUser.last_name}` : null;
-    postSystemMessage(`💰 +1 deal — ${closerName}` + (setterName ? ` (RDV pris par ${setterName})` : ''));
+    postSystemMessage(
+      `🎉💰 DEAL CLOSÉ !\n${closerName} vient de fermer une vente!`
+      + (setterName ? `\n${setterName} +$300 🙌` : '')
+      + `\nON EST EN FEU! 🔥`
+    );
   }
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
@@ -376,6 +467,12 @@ router.post('/chat/channels', requireAuth, requireOwner,      createChatChannel)
 router.get  ('/chat/messages',        requireAuth, requireChatAccess, getChatMessages);
 router.post ('/chat/messages',        requireAuth, requireChatAccess, postChatMessage);
 router.patch('/chat/messages/:id/cost', requireAuth, requireOwner,    setCostRequestPrice);
+
+// Classement hebdomadaire (setters: RDV pris, closers: deals fermes) — voir computeLeaderboard()
+// plus haut. Meme acces que le chat (setter/closer/owner), puisqu'il vit dans Team Rive-Sud.
+router.get('/leaderboard', requireAuth, requireChatAccess, (req, res) => {
+  return res.json(computeLeaderboard());
+});
 
 // ═══════════════════════════════════════════
 // LEADS CRM — section isolee pour les leads Facebook / Instagram / Google Ads.
@@ -756,6 +853,12 @@ router.get('/poll', requireAuth, (req, res) => {
       try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
     });
   }
+  // Leaderboard recalcule a chaque poll (toutes les 15s cote frontend) pour que le classement
+  // reste toujours a jour sans action manuelle — voir computeLeaderboard() plus haut.
+  let leaderboard = null;
+  if (role === 'owner' || role === 'setter' || role === 'closer') {
+    leaderboard = computeLeaderboard();
+  }
   let newAdLeads = [];
   let newAdLeadCostRequests = [];
   if (role === 'owner' || role === 'lead_marketing' || role === 'lead_closer') {
@@ -787,6 +890,7 @@ router.get('/poll', requireAuth, (req, res) => {
     newTickets,
     updatedJobs,
     newChatMessages,
+    leaderboard,
     newAdLeads,
     newAdLeadCostRequests,
     unreadNotifications: unreadCount ? unreadCount.c : 0,
