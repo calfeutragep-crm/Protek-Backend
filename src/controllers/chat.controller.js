@@ -40,15 +40,45 @@ function getChatMessages(req, res) {
      LIMIT 300`,
     [channelId]
   );
+  rows.forEach(m => {
+    try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
+  });
   return res.json(rows);
 }
 
-// POST /chat/messages — message libre (texte et/ou photo) envoye par un setter, closer ou owner,
-// dans un canal precis. La photo est deja hebergee sur Cloudinary a ce stade (uploadee via
-// POST /upload) ; on ne stocke ici que son URL, jamais de donnee client.
+// POST /chat/messages — soit un message libre (texte et/ou photo), soit une "demande de prix"
+// structuree (type: 'cost_request') envoyee par un closer depuis un rendez-vous, dans un canal
+// precis. La/les photo(s) sont deja hebergees sur Cloudinary a ce stade (uploadees via
+// POST /upload) ; on ne stocke ici que leurs URLs.
 function postChatMessage(req, res) {
-  const { text, imageUrl, channelId } = req.body;
+  const {
+    text, imageUrl, channelId, type,
+    appointmentId, clientName, footageTotal, ladderType, toolsNeeded, obstaclesToRemove, photoUrls,
+  } = req.body;
   if (!channelId) return res.status(400).json({ error: 'channelId required.' });
+
+  if (type === 'cost_request') {
+    const id = uuid();
+    const urls = Array.isArray(photoUrls) ? photoUrls : [];
+    const summary = `📋 Demande de prix — ${clientName || 'Client'}`;
+    run(
+      `INSERT INTO chat_messages (
+        id, sender_id, channel_id, type, body,
+        appointment_id, client_name, footage_total, ladder_type,
+        tools_needed, obstacles_to_remove, photo_urls, cost_status
+      ) VALUES (?, ?, ?, 'cost_request', ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [
+        id, req.user.id, channelId, summary,
+        appointmentId || null, clientName || null,
+        footageTotal ? String(footageTotal) : null, ladderType || null,
+        toolsNeeded || null, obstaclesToRemove || null, JSON.stringify(urls),
+      ]
+    );
+    const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
+    try { saved.photo_urls = JSON.parse(saved.photo_urls || '[]'); } catch { saved.photo_urls = []; }
+    return res.status(201).json({ message: 'Cost request sent.', id, chatMessage: saved });
+  }
+
   const trimmed = text ? String(text).trim() : '';
   if (!trimmed && !imageUrl) return res.status(400).json({ error: 'text or imageUrl required.' });
   const id = uuid();
@@ -58,6 +88,22 @@ function postChatMessage(req, res) {
   );
   const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
   return res.status(201).json({ message: 'Sent.', id, chatMessage: saved });
+}
+
+// PATCH /chat/messages/:id/cost — l'owner renseigne le prix d'une demande de prix ("ticket cost").
+// Le ticket passe alors de cost_status='pending' a 'priced' et le prix est visible dans le canal
+// Cost pour tous (setter/closer/owner), utile pour la paie du closer concerne.
+function setCostRequestPrice(req, res) {
+  const { id } = req.params;
+  const { cost } = req.body;
+  const parsed = parseFloat(cost);
+  if (!parsed || parsed <= 0) return res.status(400).json({ error: 'Valid cost required.' });
+  const msg = get('SELECT id FROM chat_messages WHERE id = ? AND type = ?', [id, 'cost_request']);
+  if (!msg) return res.status(404).json({ error: 'Cost request not found.' });
+  run(`UPDATE chat_messages SET cost = ?, cost_status = 'priced' WHERE id = ?`, [parsed, id]);
+  const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
+  try { saved.photo_urls = JSON.parse(saved.photo_urls || '[]'); } catch { saved.photo_urls = []; }
+  return res.json({ message: 'Cost updated.', chatMessage: saved });
 }
 
 // Fonction interne (pas une route) — appelee depuis les routes deals/leads pour poster
@@ -76,5 +122,5 @@ function postSystemMessage(text, channelName) {
 
 module.exports = {
   getChatChannels, createChatChannel,
-  getChatMessages, postChatMessage, postSystemMessage,
+  getChatMessages, postChatMessage, postSystemMessage, setCostRequestPrice,
 };
