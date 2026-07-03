@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { v4: uuid } = require('uuid');
 
 let db = null;
 let SQL = null;
@@ -17,6 +18,8 @@ async function initDb() {
   }
   createSchema();
   migrateNewColumns();
+  seedChatChannels();
+  backfillChatChannels();
   seedRoles();
   return db;
 }
@@ -144,14 +147,21 @@ function createSchema() {
       FOREIGN KEY(setter_id) REFERENCES users(id),
       FOREIGN KEY(tech_id) REFERENCES users(id)
     );
+    CREATE TABLE IF NOT EXISTS chat_channels (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS chat_messages (
       id TEXT PRIMARY KEY,
       sender_id TEXT,
+      channel_id TEXT,
       type TEXT NOT NULL DEFAULT 'user',
       body TEXT NOT NULL,
       image_url TEXT,
       created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY(sender_id) REFERENCES users(id)
+      FOREIGN KEY(sender_id) REFERENCES users(id),
+      FOREIGN KEY(channel_id) REFERENCES chat_channels(id)
     );
     CREATE TABLE IF NOT EXISTS installation_tickets (
       id TEXT PRIMARY KEY,
@@ -216,6 +226,7 @@ function migrateNewColumns() {
     { table: 'installation_tickets', column: 'tools_needed',        def: 'TEXT' },
     { table: 'installation_tickets', column: 'tools_notes',         def: 'TEXT' },
     { table: 'chat_messages',        column: 'image_url',           def: 'TEXT' },
+    { table: 'chat_messages',        column: 'channel_id',          def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
@@ -226,6 +237,25 @@ function migrateNewColumns() {
     }
   });
   if (changed) saveDb();
+}
+
+// --- Sous-chats par defaut : Team Rive-Sud, Cost, Liste de streets ---
+// Idempotent grace a UNIQUE(name) + INSERT OR IGNORE : ne recree rien si deja present.
+function seedChatChannels() {
+  const defaults = ['Team Rive-Sud', 'Cost', 'Liste de streets'];
+  const stmt = db.prepare('INSERT OR IGNORE INTO chat_channels (id, name) VALUES (?, ?)');
+  defaults.forEach(name => stmt.run([uuid(), name]));
+  stmt.free();
+  saveDb();
+}
+
+// Les messages envoyes avant l'ajout des canaux n'ont pas de channel_id — on les rattache
+// au canal "Team Rive-Sud" par defaut pour ne rien perdre.
+function backfillChatChannels() {
+  const defaultChannel = get('SELECT id FROM chat_channels WHERE name = ?', ['Team Rive-Sud']);
+  if (!defaultChannel) return;
+  db.run('UPDATE chat_messages SET channel_id = ? WHERE channel_id IS NULL', [defaultChannel.id]);
+  saveDb();
 }
 
 function seedRoles() {
