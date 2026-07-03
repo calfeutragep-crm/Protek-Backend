@@ -359,7 +359,7 @@ router.get('/deals', requireAuth, (req, res) => {
 
 router.post('/deals', requireAuth, (req, res) => {
   const {
-    appointmentId, clientName, address, phone, email,
+    appointmentId, clientName, address, city, postal, phone, email,
     price, paymentMethod,
     footageTotal, footageOther,
     ladderHeight, installDate,
@@ -381,17 +381,17 @@ router.post('/deals', requireAuth, (req, res) => {
   run(
     `INSERT INTO deals (
        id, appointment_id, closer_id, setter_id,
-       client_name, address, phone, email,
+       client_name, address, city, postal, phone, email,
        price, payment_method,
        footage_total, footage_other,
        ladder_height, install_date,
        work_front, work_right, work_left, work_rear,
        notes, photo_urls, status,
        obstacles_to_remove, tools_needed, tools_notes, ad_lead_id
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dealId, appointmentId || null, closerId, setterId,
-      clientName, address || null, phone || null, email || null,
+      clientName, address || null, city || null, postal || null, phone || null, email || null,
       parseFloat(price) || 0, paymentMethod || null,
       parseFloat(footageTotal) || 0,
       footageOther || null,
@@ -707,7 +707,7 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       customerName: ((l.first_name || '') + ' ' + (l.last_name || '')).trim(),
       phone: l.phone || '', email: l.email || '',
       address: (deal && deal.address) || l.address || '',
-      city: l.city || '', postal: l.postal || '',
+      city: (deal && deal.city) || l.city || '', postal: (deal && deal.postal) || l.postal || '',
       notes: l.notes || '',
       status,
       createdAt: l.created_at,
@@ -740,9 +740,9 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       customerName: ((al.first_name || '') + ' ' + (al.last_name || '')).trim(),
       phone: al.phone || '', email: al.email || '',
       address: (deal && deal.address) || '',
-      // ad_leads n'a pas de champs ville/code postal distincts (uniquement collectes une fois
-      // le deal ferme, dans un champ adresse libre) — restent vides tant qu'aucun deal n'existe.
-      city: '', postal: '',
+      // ad_leads n'a pas de champs ville/code postal distincts — collectes uniquement une fois
+      // le deal ferme (formulaire du closer), donc vides tant qu'aucun deal n'existe.
+      city: (deal && deal.city) || '', postal: (deal && deal.postal) || '',
       notes: al.notes || '',
       status,
       createdAt: al.created_at,
@@ -773,7 +773,7 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       leadSource: 'Direct',
       customerName: d.client_name || '',
       phone: d.phone || '', email: d.email || '',
-      address: d.address || '', city: '', postal: '',
+      address: d.address || '', city: d.city || '', postal: d.postal || '',
       notes: d.notes || '',
       status,
       createdAt: d.created_at,
