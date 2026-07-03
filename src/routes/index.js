@@ -506,6 +506,196 @@ router.patch('/leads-crm/cost-requests/:id/cost', requireAuth, requireOwner, (re
   return res.json({ message: 'Cost updated.' });
 });
 
+// ═══════════════════════════════════════════
+// MASTER DATABASE — vue unifiee (owner uniquement). Fusionne tout ce qui est jamais entre dans
+// l'entreprise, peu importe l'origine (porte-a-porte ou leads Facebook/Instagram/Google Ads) :
+// lead -> rendez-vous -> deal -> ticket d'installation, de la creation a la fin du job.
+//
+// La table `deals` est le pivot commun aux deux CRM (deals.appointment_id pour le porte-a-porte,
+// deals.ad_lead_id pour les leads marketing) — on rattache donc chaque deal a son lead d'origine
+// plutot que de dupliquer les lignes. Une fois qu'un deal existe, le meme installation_ticket est
+// cree par createTicketFromDeal() peu importe l'origine (voir POST /deals) : le pipeline
+// d'installation est deja unifie, cette route ne fait qu'exposer le tout regroupe et etiquete.
+router.get('/database', requireAuth, requireOwner, (req, res) => {
+  function parseUrls(raw) {
+    try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
+  }
+  function mergePhotos() {
+    const seen = new Set(); const out = [];
+    Array.prototype.forEach.call(arguments, function (list) {
+      (list || []).forEach(function (u) { if (u && !seen.has(u)) { seen.add(u); out.push(u); } });
+    });
+    return out;
+  }
+
+  // --- Porte-a-porte : leads + leurs rendez-vous ---
+  const leads = query(
+    `SELECT l.*,
+       s.first_name || ' ' || s.last_name AS setter_name,
+       c.first_name || ' ' || c.last_name AS closer_name
+     FROM leads l
+     LEFT JOIN users s ON l.setter_id = s.id
+     LEFT JOIN users c ON l.closer_id = c.id`
+  );
+  const appts = query(`SELECT * FROM appointments`);
+  const apptsByLeadId = {};
+  appts.forEach(a => {
+    if (!apptsByLeadId[a.lead_id]) apptsByLeadId[a.lead_id] = [];
+    apptsByLeadId[a.lead_id].push(a);
+  });
+
+  // --- Deals : table pivot commune aux deux CRM ---
+  const deals = query(
+    `SELECT d.*,
+       c.first_name  || ' ' || c.last_name  AS closer_name,
+       s.first_name  || ' ' || s.last_name  AS setter_name,
+       te.first_name || ' ' || te.last_name AS tech_name
+     FROM deals d
+     LEFT JOIN users c  ON d.closer_id = c.id
+     LEFT JOIN users s  ON d.setter_id = s.id
+     LEFT JOIN users te ON d.tech_id   = te.id`
+  );
+  const dealsByAppointmentId = {};
+  const dealsByAdLeadId = {};
+  deals.forEach(d => {
+    if (d.appointment_id) dealsByAppointmentId[d.appointment_id] = d;
+    if (d.ad_lead_id)     dealsByAdLeadId[d.ad_lead_id] = d;
+  });
+
+  // --- Tickets d'installation : etape finale, commune aux deux CRM ---
+  const tickets = query(
+    `SELECT t.*, te.first_name || ' ' || te.last_name AS tech_name
+     FROM installation_tickets t
+     LEFT JOIN users te ON t.tech_id = te.id`
+  );
+  const ticketsByDealId = {};
+  tickets.forEach(t => { ticketsByDealId[t.deal_id] = t; });
+
+  // --- Demandes de prix porte-a-porte (chat "Ask for Cost", liees a un rendez-vous precis) ---
+  const d2dCostRequests = query(
+    `SELECT * FROM chat_messages WHERE type = 'cost_request' AND appointment_id IS NOT NULL ORDER BY created_at DESC`
+  );
+  const d2dCostByApptId = {};
+  d2dCostRequests.forEach(cr => { if (!d2dCostByApptId[cr.appointment_id]) d2dCostByApptId[cr.appointment_id] = cr; });
+
+  // --- Leads marketing (Facebook / Google Ads / Instagram / Autre) ---
+  const adLeads = query(
+    `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
+     FROM ad_leads l
+     LEFT JOIN users c ON l.closer_id = c.id`
+  );
+  const adLeadCostRequests = query(`SELECT * FROM ad_lead_cost_requests ORDER BY created_at DESC`);
+  const adLeadCostByAdLeadId = {};
+  adLeadCostRequests.forEach(cr => { if (!adLeadCostByAdLeadId[cr.ad_lead_id]) adLeadCostByAdLeadId[cr.ad_lead_id] = cr; });
+
+  const rows = [];
+
+  // 1) Chaque lead porte-a-porte, avec son rendez-vous / deal / ticket / cout s'ils existent.
+  leads.forEach(l => {
+    const leadAppts = (apptsByLeadId[l.id] || []).slice().sort((a, b) =>
+      (b.appt_date || '').localeCompare(a.appt_date || '') || (b.created_at || '').localeCompare(a.created_at || '')
+    );
+    // On privilegie le rendez-vous qui a un deal attache ; sinon le plus recent.
+    const appt = leadAppts.find(a => dealsByAppointmentId[a.id]) || leadAppts[0] || null;
+    const deal = appt ? dealsByAppointmentId[appt.id] : null;
+    const ticket = deal ? ticketsByDealId[deal.id] : null;
+    const costReq = appt ? d2dCostByApptId[appt.id] : null;
+    const status = (ticket && ticket.status) || (deal && deal.status) || (appt && appt.status) || l.status || 'Scheduled';
+
+    rows.push({
+      id: 'lead:' + l.id,
+      crmType: 'd2d',
+      crmLabel: 'Door-to-Door',
+      leadSource: 'Door-to-Door',
+      customerName: ((l.first_name || '') + ' ' + (l.last_name || '')).trim(),
+      phone: l.phone || '', email: l.email || '',
+      address: (deal && deal.address) || l.address || '',
+      city: l.city || '', postal: l.postal || '',
+      notes: l.notes || '',
+      status,
+      createdAt: l.created_at,
+      apptDate: appt ? appt.appt_date : null,
+      apptHour: appt ? appt.appt_hour : null,
+      setterName: l.setter_name || (deal && deal.setter_name) || '',
+      closerName: l.closer_name || (deal && deal.closer_name) || '',
+      techName: (deal && deal.tech_name) || (ticket && ticket.tech_name) || '',
+      saleAmount: deal ? (parseFloat(deal.price) || 0) : null,
+      jobCost: costReq && costReq.cost != null ? parseFloat(costReq.cost) : null,
+      jobCostStatus: costReq ? costReq.cost_status : null,
+      installDate: (ticket && ticket.scheduled_install_date) || (deal && deal.install_date) || null,
+      photos: mergePhotos(parseUrls(deal && deal.photo_urls), parseUrls(ticket && ticket.photo_urls), parseUrls(costReq && costReq.photo_urls)),
+      leadId: l.id, apptId: appt ? appt.id : null, dealId: deal ? deal.id : null, ticketId: ticket ? ticket.id : null, adLeadId: null,
+    });
+  });
+
+  // 2) Chaque lead marketing, avec son deal / ticket / cout s'ils existent.
+  adLeads.forEach(al => {
+    const deal = dealsByAdLeadId[al.id] || null;
+    const ticket = deal ? ticketsByDealId[deal.id] : null;
+    const costReq = adLeadCostByAdLeadId[al.id] || null;
+    const status = (ticket && ticket.status) || (deal && deal.status) || al.status || 'New';
+
+    rows.push({
+      id: 'adlead:' + al.id,
+      crmType: 'marketing',
+      crmLabel: 'Marketing Lead',
+      leadSource: al.source || 'Autre',
+      customerName: ((al.first_name || '') + ' ' + (al.last_name || '')).trim(),
+      phone: al.phone || '', email: al.email || '',
+      address: (deal && deal.address) || '',
+      // ad_leads n'a pas de champs ville/code postal distincts (uniquement collectes une fois
+      // le deal ferme, dans un champ adresse libre) — restent vides tant qu'aucun deal n'existe.
+      city: '', postal: '',
+      notes: al.notes || '',
+      status,
+      createdAt: al.created_at,
+      apptDate: al.appt_date || null,
+      apptHour: al.appt_hour || null,
+      setterName: '',
+      closerName: al.closer_name || (deal && deal.closer_name) || '',
+      techName: (deal && deal.tech_name) || (ticket && ticket.tech_name) || '',
+      saleAmount: deal ? (parseFloat(deal.price) || 0) : null,
+      jobCost: costReq && costReq.cost != null ? parseFloat(costReq.cost) : null,
+      jobCostStatus: costReq ? costReq.cost_status : null,
+      installDate: (ticket && ticket.scheduled_install_date) || (deal && deal.install_date) || null,
+      photos: mergePhotos(parseUrls(deal && deal.photo_urls), parseUrls(ticket && ticket.photo_urls), parseUrls(costReq && costReq.photo_urls)),
+      leadId: null, apptId: null, dealId: deal ? deal.id : null, ticketId: ticket ? ticket.id : null, adLeadId: al.id,
+    });
+  });
+
+  // 3) Filet de securite : deals sans lead ni ad_lead rattache (ne devrait pas arriver en usage
+  // normal, mais un deal ferme ne doit jamais disparaitre de la base juste parce qu'il est orphelin).
+  deals.forEach(d => {
+    if (d.appointment_id || d.ad_lead_id) return; // deja couvert plus haut
+    const ticket = ticketsByDealId[d.id] || null;
+    const status = (ticket && ticket.status) || d.status || 'Pending Installation';
+    rows.push({
+      id: 'deal:' + d.id,
+      crmType: 'other',
+      crmLabel: 'Autre',
+      leadSource: 'Direct',
+      customerName: d.client_name || '',
+      phone: d.phone || '', email: d.email || '',
+      address: d.address || '', city: '', postal: '',
+      notes: d.notes || '',
+      status,
+      createdAt: d.created_at,
+      apptDate: null, apptHour: null,
+      setterName: d.setter_name || '',
+      closerName: d.closer_name || '',
+      techName: d.tech_name || (ticket && ticket.tech_name) || '',
+      saleAmount: parseFloat(d.price) || 0,
+      jobCost: null, jobCostStatus: null,
+      installDate: (ticket && ticket.scheduled_install_date) || d.install_date || null,
+      photos: mergePhotos(parseUrls(d.photo_urls), parseUrls(ticket && ticket.photo_urls)),
+      leadId: null, apptId: null, dealId: d.id, ticketId: ticket ? ticket.id : null, adLeadId: null,
+    });
+  });
+
+  rows.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return res.json(rows);
+});
+
 router.get('/poll', requireAuth, (req, res) => {
   const since = req.query.since || new Date(Date.now() - 30000).toISOString();
   const role = req.user.role;
@@ -515,11 +705,13 @@ router.get('/poll', requireAuth, (req, res) => {
       `SELECT t.*,
          tech.first_name || ' ' || tech.last_name AS tech_name,
          cl.first_name   || ' ' || cl.last_name   AS closer_name,
-         st.first_name   || ' ' || st.last_name   AS setter_name
+         st.first_name   || ' ' || st.last_name   AS setter_name,
+         CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
        FROM installation_tickets t
        LEFT JOIN users tech ON t.tech_id   = tech.id
        LEFT JOIN users cl   ON t.closer_id = cl.id
        LEFT JOIN users st   ON t.setter_id = st.id
+       LEFT JOIN deals d    ON t.deal_id   = d.id
        WHERE t.updated_at > ?
        ORDER BY t.created_at DESC`,
       [since]
@@ -533,10 +725,12 @@ router.get('/poll', requireAuth, (req, res) => {
     updatedJobs = query(
       `SELECT t.*,
          cl.first_name || ' ' || cl.last_name AS closer_name,
-         st.first_name || ' ' || st.last_name AS setter_name
+         st.first_name || ' ' || st.last_name AS setter_name,
+         CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
        FROM installation_tickets t
        LEFT JOIN users cl ON t.closer_id = cl.id
        LEFT JOIN users st ON t.setter_id = st.id
+       LEFT JOIN deals d  ON t.deal_id   = d.id
        WHERE t.tech_id = ? AND t.updated_at > ?
        ORDER BY t.scheduled_install_date ASC`,
       [req.user.id, since]
