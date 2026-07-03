@@ -13,7 +13,7 @@ const {
 const { getTickets, getTicket, updateTicket, createTicketFromDeal, syncTicketFromDeal } = require('../controllers/tickets.controller');
 const {
   getChatChannels, createChatChannel,
-  getChatMessages, postChatMessage, postSystemMessage,
+  getChatMessages, postChatMessage, postSystemMessage, setCostRequestPrice,
 } = require('../controllers/chat.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
@@ -338,8 +338,9 @@ router.patch('/tickets/:id', requireAuth, requireManagerOrOwner, updateTicket);
 router.get ('/chat/channels', requireAuth, requireChatAccess, getChatChannels);
 router.post('/chat/channels', requireAuth, requireOwner,      createChatChannel);
 
-router.get ('/chat/messages', requireAuth, requireChatAccess, getChatMessages);
-router.post('/chat/messages', requireAuth, requireChatAccess, postChatMessage);
+router.get  ('/chat/messages',        requireAuth, requireChatAccess, getChatMessages);
+router.post ('/chat/messages',        requireAuth, requireChatAccess, postChatMessage);
+router.patch('/chat/messages/:id/cost', requireAuth, requireOwner,    setCostRequestPrice);
 
 router.get('/poll', requireAuth, (req, res) => {
   const since = req.query.since || new Date(Date.now() - 30000).toISOString();
@@ -393,6 +394,9 @@ router.get('/poll', requireAuth, (req, res) => {
        ORDER BY m.created_at ASC`,
       [since]
     );
+    newChatMessages.forEach(m => {
+      try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
+    });
   }
   const unreadCount = get(
     'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0',
