@@ -3,10 +3,18 @@ const { query, get, run } = require('../utils/database');
 
 const DEFAULT_CHANNEL_NAME = 'Team Rive-Sud';
 
+// Le canal "Cost" contient les prix de revient des jobs — reserve au closer et a l'owner.
+// Le setter garde acces a tous les autres canaux (Team Rive-Sud, Liste de streets, etc.).
+function isCostChannelId(channelId) {
+  const ch = get('SELECT name FROM chat_channels WHERE id = ?', [channelId]);
+  return !!ch && ch.name === 'Cost';
+}
+
 // GET /chat/channels — liste des sous-chats (Team Rive-Sud, Cost, Liste de streets, + ceux
-// ajoutes par l'owner). Visible par setter, closer, owner.
+// ajoutes par l'owner). Visible par setter, closer, owner — sauf "Cost", masque au setter.
 function getChatChannels(req, res) {
-  const rows = query('SELECT * FROM chat_channels ORDER BY created_at ASC');
+  let rows = query('SELECT * FROM chat_channels ORDER BY created_at ASC');
+  if (req.user.role === 'setter') rows = rows.filter(c => c.name !== 'Cost');
   return res.json(rows);
 }
 
@@ -28,6 +36,9 @@ function createChatChannel(req, res) {
 function getChatMessages(req, res) {
   const { channelId } = req.query;
   if (!channelId) return res.status(400).json({ error: 'channelId required.' });
+  if (req.user.role === 'setter' && isCostChannelId(channelId)) {
+    return res.status(403).json({ error: 'Le canal Cost est reserve au closer et a l\'owner.' });
+  }
   const rows = query(
     `SELECT m.*,
        u.first_name AS sender_first_name, u.last_name AS sender_last_name,
@@ -56,6 +67,9 @@ function postChatMessage(req, res) {
     appointmentId, clientName, footageTotal, ladderType, toolsNeeded, obstaclesToRemove, photoUrls,
   } = req.body;
   if (!channelId) return res.status(400).json({ error: 'channelId required.' });
+  if (req.user.role === 'setter' && isCostChannelId(channelId)) {
+    return res.status(403).json({ error: 'Le canal Cost est reserve au closer et a l\'owner.' });
+  }
 
   if (type === 'cost_request') {
     const id = uuid();
