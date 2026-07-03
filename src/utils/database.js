@@ -24,12 +24,43 @@ async function initDb() {
   return db;
 }
 
-function saveDb() {
-  if (!db) return;
+// db.export() serialise TOUTE la base sql.js en memoire a chaque appel, puis on l'ecrit sur
+// disque — un cout proportionnel a la taille totale de la base (photos, notes, historique de
+// TOUS les clients). Avant ce correctif, saveDb() s'executait de facon SYNCHRONE et IMMEDIATE
+// apres CHAQUE run() — souvent plusieurs fois par requete (ex: creer un ticket + notifier N
+// gestionnaires = N+1 exports d'affilee) — ce qui bloquait tout le event loop Node pendant
+// plusieurs secondes des que la base a grossi. C'etait la cause du delai de 20-30s en cliquant
+// sur un bouton/icone. On regroupe maintenant les sauvegardes (debounce) : plusieurs run()
+// rapproches ne declenchent qu'un seul export+ecriture, avec un delai maximum de securite pour
+// ne jamais retarder la persistance de plus de ~1.5s (utile en cas de crash/redeploiement).
+let saveTimer = null;
+let maxWaitTimer = null;
+let saveDirty = false;
+const SAVE_DEBOUNCE_MS = 300;
+const SAVE_MAX_WAIT_MS = 1500;
+
+function flushDbSync() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (maxWaitTimer) { clearTimeout(maxWaitTimer); maxWaitTimer = null; }
+  if (!db || !saveDirty) return;
   const dataDir = path.dirname(DB_PATH);
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
+  saveDirty = false;
 }
+
+function saveDb() {
+  if (!db) return;
+  saveDirty = true;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(flushDbSync, SAVE_DEBOUNCE_MS);
+  if (!maxWaitTimer) maxWaitTimer = setTimeout(flushDbSync, SAVE_MAX_WAIT_MS);
+}
+
+// Toujours persister avant que le process ne s'arrete (redeploiement Railway, crash gracieux, etc.)
+process.on('SIGTERM', flushDbSync);
+process.on('SIGINT', flushDbSync);
+process.on('beforeExit', flushDbSync);
 
 function createSchema() {
   db.run(`
