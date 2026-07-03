@@ -48,6 +48,8 @@ function createSchema() {
       role_id INTEGER,
       requested_role_id INTEGER,
       status TEXT NOT NULL DEFAULT 'pending',
+      notify_email TEXT,
+      notify_phone TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(role_id) REFERENCES roles(id)
@@ -140,12 +142,50 @@ function createSchema() {
       obstacles_to_remove TEXT,
       tools_needed TEXT,
       tools_notes TEXT,
+      ad_lead_id TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(appointment_id) REFERENCES appointments(id),
       FOREIGN KEY(closer_id) REFERENCES users(id),
       FOREIGN KEY(setter_id) REFERENCES users(id),
-      FOREIGN KEY(tech_id) REFERENCES users(id)
+      FOREIGN KEY(tech_id) REFERENCES users(id),
+      FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id)
+    );
+    CREATE TABLE IF NOT EXISTS ad_leads (
+      id TEXT PRIMARY KEY,
+      source TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      phone TEXT,
+      email TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'New',
+      closer_id TEXT,
+      contacted_at TEXT,
+      appt_date TEXT,
+      appt_hour INTEGER,
+      created_by TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(closer_id) REFERENCES users(id),
+      FOREIGN KEY(created_by) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS ad_lead_cost_requests (
+      id TEXT PRIMARY KEY,
+      ad_lead_id TEXT,
+      closer_id TEXT,
+      client_name TEXT,
+      footage_total TEXT,
+      ladder_type TEXT,
+      tools_needed TEXT,
+      obstacles_to_remove TEXT,
+      photo_urls TEXT DEFAULT '[]',
+      cost REAL,
+      cost_status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id),
+      FOREIGN KEY(closer_id) REFERENCES users(id)
     );
     CREATE TABLE IF NOT EXISTS chat_channels (
       id TEXT PRIMARY KEY,
@@ -245,6 +285,9 @@ function migrateNewColumns() {
     { table: 'chat_messages',        column: 'photo_urls',          def: "TEXT DEFAULT '[]'" },
     { table: 'chat_messages',        column: 'cost',                def: 'REAL' },
     { table: 'chat_messages',        column: 'cost_status',         def: "TEXT DEFAULT 'pending'" },
+    { table: 'users',                column: 'notify_email',        def: 'TEXT' },
+    { table: 'users',                column: 'notify_phone',        def: 'TEXT' },
+    { table: 'deals',                column: 'ad_lead_id',          def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
@@ -283,6 +326,8 @@ function seedRoles() {
     [3, 'closer', 'Closer'],
     [4, 'manager', 'Installation Manager'],
     [5, 'tech', 'Technician'],
+    [6, 'lead_marketing', 'Marketing (Leads)'],
+    [7, 'lead_closer', 'Lead Closer'],
   ];
   const stmt = db.prepare('INSERT OR IGNORE INTO roles (id, name, label) VALUES (?, ?, ?)');
   roles.forEach(r => stmt.run(r));
