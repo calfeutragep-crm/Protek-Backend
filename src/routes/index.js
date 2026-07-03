@@ -11,7 +11,10 @@ const {
   getNotifications, markNotificationRead, markAllNotificationsRead, getAuditLogs,
 } = require('../controllers/users.controller');
 const { getTickets, getTicket, updateTicket, createTicketFromDeal, syncTicketFromDeal } = require('../controllers/tickets.controller');
-const { getChatMessages, postChatMessage, postSystemMessage } = require('../controllers/chat.controller');
+const {
+  getChatChannels, createChatChannel,
+  getChatMessages, postChatMessage, postSystemMessage,
+} = require('../controllers/chat.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
 
@@ -331,6 +334,9 @@ router.patch('/deals/:id', requireAuth, (req, res) => {
 router.get  ('/tickets',     requireAuth, requireTicketAccess,   getTickets);
 router.get  ('/tickets/:id', requireAuth, requireTicketAccess,   getTicket);
 router.patch('/tickets/:id', requireAuth, requireManagerOrOwner, updateTicket);
+
+router.get ('/chat/channels', requireAuth, requireChatAccess, getChatChannels);
+router.post('/chat/channels', requireAuth, requireOwner,      createChatChannel);
 
 router.get ('/chat/messages', requireAuth, requireChatAccess, getChatMessages);
 router.post('/chat/messages', requireAuth, requireChatAccess, postChatMessage);
