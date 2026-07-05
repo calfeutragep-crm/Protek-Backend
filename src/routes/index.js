@@ -729,6 +729,24 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       installDate: (ticket && ticket.scheduled_install_date) || (deal && deal.install_date) || null,
       photos: mergePhotos(parseUrls(deal && deal.photo_urls), parseUrls(ticket && ticket.photo_urls), parseUrls(costReq && costReq.photo_urls)),
       leadId: l.id, apptId: appt ? appt.id : null, dealId: deal ? deal.id : null, ticketId: ticket ? ticket.id : null, adLeadId: null,
+      // Specificites du job — saisies par le closer au deal (voir openDealSheet), dupliquees sur
+      // le ticket d'installation ensuite : on prend le deal en priorite (source la plus tot
+      // disponible), le ticket en repli si jamais le deal a ete purge mais pas le ticket.
+      apptNotes: appt ? (appt.notes || '') : '',
+      paymentMethod: (deal && deal.payment_method) || '',
+      footageTotal: (deal && deal.footage_total != null) ? deal.footage_total : ((ticket && ticket.footage_total != null) ? ticket.footage_total : null),
+      footageWhite: (deal && deal.footage_white) || (ticket && ticket.footage_white) || null,
+      footageBlack: (deal && deal.footage_black) || (ticket && ticket.footage_black) || null,
+      footageWheat: (deal && deal.footage_wheat) || (ticket && ticket.footage_wheat) || null,
+      footageOther: (deal && deal.footage_other) || (ticket && ticket.footage_other) || '',
+      ladderHeight: (deal && deal.ladder_height) || (ticket && ticket.ladder_height) || '',
+      workFront: (deal && deal.work_front) || (ticket && ticket.work_front) || '',
+      workRight: (deal && deal.work_right) || (ticket && ticket.work_right) || '',
+      workLeft: (deal && deal.work_left) || (ticket && ticket.work_left) || '',
+      workRear: (deal && deal.work_rear) || (ticket && ticket.work_rear) || '',
+      obstaclesToRemove: (deal && deal.obstacles_to_remove) || (ticket && ticket.obstacles_to_remove) || '',
+      toolsNeeded: (deal && deal.tools_needed) || (ticket && ticket.tools_needed) || '',
+      toolsNotes: (deal && deal.tools_notes) || (ticket && ticket.tools_notes) || '',
     });
   });
 
@@ -764,6 +782,21 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       installDate: (ticket && ticket.scheduled_install_date) || (deal && deal.install_date) || null,
       photos: mergePhotos(parseUrls(deal && deal.photo_urls), parseUrls(ticket && ticket.photo_urls), parseUrls(costReq && costReq.photo_urls)),
       leadId: null, apptId: null, dealId: deal ? deal.id : null, ticketId: ticket ? ticket.id : null, adLeadId: al.id,
+      apptNotes: al.notes || '',
+      paymentMethod: (deal && deal.payment_method) || '',
+      footageTotal: (deal && deal.footage_total != null) ? deal.footage_total : ((ticket && ticket.footage_total != null) ? ticket.footage_total : null),
+      footageWhite: (deal && deal.footage_white) || (ticket && ticket.footage_white) || null,
+      footageBlack: (deal && deal.footage_black) || (ticket && ticket.footage_black) || null,
+      footageWheat: (deal && deal.footage_wheat) || (ticket && ticket.footage_wheat) || null,
+      footageOther: (deal && deal.footage_other) || (ticket && ticket.footage_other) || '',
+      ladderHeight: (deal && deal.ladder_height) || (ticket && ticket.ladder_height) || '',
+      workFront: (deal && deal.work_front) || (ticket && ticket.work_front) || '',
+      workRight: (deal && deal.work_right) || (ticket && ticket.work_right) || '',
+      workLeft: (deal && deal.work_left) || (ticket && ticket.work_left) || '',
+      workRear: (deal && deal.work_rear) || (ticket && ticket.work_rear) || '',
+      obstaclesToRemove: (deal && deal.obstacles_to_remove) || (ticket && ticket.obstacles_to_remove) || '',
+      toolsNeeded: (deal && deal.tools_needed) || (ticket && ticket.tools_needed) || '',
+      toolsNotes: (deal && deal.tools_notes) || (ticket && ticket.tools_notes) || '',
     });
   });
 
@@ -793,6 +826,21 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
       installDate: (ticket && ticket.scheduled_install_date) || d.install_date || null,
       photos: mergePhotos(parseUrls(d.photo_urls), parseUrls(ticket && ticket.photo_urls)),
       leadId: null, apptId: null, dealId: d.id, ticketId: ticket ? ticket.id : null, adLeadId: null,
+      apptNotes: '',
+      paymentMethod: d.payment_method || '',
+      footageTotal: d.footage_total != null ? d.footage_total : ((ticket && ticket.footage_total != null) ? ticket.footage_total : null),
+      footageWhite: d.footage_white || (ticket && ticket.footage_white) || null,
+      footageBlack: d.footage_black || (ticket && ticket.footage_black) || null,
+      footageWheat: d.footage_wheat || (ticket && ticket.footage_wheat) || null,
+      footageOther: d.footage_other || (ticket && ticket.footage_other) || '',
+      ladderHeight: d.ladder_height || (ticket && ticket.ladder_height) || '',
+      workFront: d.work_front || (ticket && ticket.work_front) || '',
+      workRight: d.work_right || (ticket && ticket.work_right) || '',
+      workLeft: d.work_left || (ticket && ticket.work_left) || '',
+      workRear: d.work_rear || (ticket && ticket.work_rear) || '',
+      obstaclesToRemove: d.obstacles_to_remove || (ticket && ticket.obstacles_to_remove) || '',
+      toolsNeeded: d.tools_needed || (ticket && ticket.tools_needed) || '',
+      toolsNotes: d.tools_notes || (ticket && ticket.tools_notes) || '',
     });
   });
 
@@ -800,8 +848,65 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
   return res.json(rows);
 });
 
+// DELETE /database/:id — supprime definitivement un client/lead/deal et TOUT ce qui lui est
+// rattache (rendez-vous, deal, ticket d'installation, demandes de prix liees). Reserve a l'owner
+// (voir requireOwner) — utile pour purger des donnees de test ou corriger une erreur de saisie.
+// :id est l'id compose retourne par GET /database ("lead:<id>" / "adlead:<id>" / "deal:<id>").
+router.delete('/database/:id', requireAuth, requireOwner, (req, res) => {
+  const raw = req.params.id || '';
+  const sep = raw.indexOf(':');
+  if (sep < 0) return res.status(400).json({ error: 'Invalid id.' });
+  const kind = raw.slice(0, sep);
+  const realId = raw.slice(sep + 1);
+  if (!realId) return res.status(400).json({ error: 'Invalid id.' });
+
+  function deleteDealChain(dealId) {
+    if (!dealId) return;
+    run('DELETE FROM installation_tickets WHERE deal_id = ?', [dealId]);
+    run('DELETE FROM deals WHERE id = ?', [dealId]);
+  }
+
+  if (kind === 'lead') {
+    const lead = get('SELECT id FROM leads WHERE id = ?', [realId]);
+    if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+    const appts = query('SELECT id FROM appointments WHERE lead_id = ?', [realId]);
+    appts.forEach(a => {
+      const deal = get('SELECT id FROM deals WHERE appointment_id = ?', [a.id]);
+      if (deal) deleteDealChain(deal.id);
+      run(`DELETE FROM chat_messages WHERE type = 'cost_request' AND appointment_id = ?`, [a.id]);
+    });
+    run('DELETE FROM appointments WHERE lead_id = ?', [realId]);
+    run('DELETE FROM leads WHERE id = ?', [realId]);
+  } else if (kind === 'adlead') {
+    const adLead = get('SELECT id FROM ad_leads WHERE id = ?', [realId]);
+    if (!adLead) return res.status(404).json({ error: 'Lead not found.' });
+    const deal = get('SELECT id FROM deals WHERE ad_lead_id = ?', [realId]);
+    if (deal) deleteDealChain(deal.id);
+    run('DELETE FROM ad_lead_cost_requests WHERE ad_lead_id = ?', [realId]);
+    run('DELETE FROM ad_leads WHERE id = ?', [realId]);
+  } else if (kind === 'deal') {
+    const deal = get('SELECT id FROM deals WHERE id = ?', [realId]);
+    if (!deal) return res.status(404).json({ error: 'Deal not found.' });
+    deleteDealChain(realId);
+  } else {
+    return res.status(400).json({ error: 'Invalid id.' });
+  }
+
+  run('INSERT INTO audit_logs (id, actor_id, action, target_id, details) VALUES (?, ?, ?, ?, ?)',
+    [uuid(), req.user.id, 'delete_database_entry', realId, JSON.stringify({ kind })]);
+  return res.json({ message: 'Deleted.' });
+});
+
 router.get('/poll', requireAuth, (req, res) => {
-  const since = req.query.since || new Date(Date.now() - 30000).toISOString();
+  const sinceRaw = req.query.since || new Date(Date.now() - 30000).toISOString();
+  // Bug racine (touchait TOUS les polls, pas seulement le cout) : les colonnes *_at sont du TEXT
+  // rempli via SQLite datetime('now') -> format "YYYY-MM-DD HH:MM:SS", alors que le frontend
+  // envoie un ISO string JS -> "YYYY-MM-DDTHH:MM:SS.sssZ". En comparaison texte, le caractere
+  // 'T' (0x54) est toujours superieur a l'espace (0x20) a la meme position, donc
+  // `col > since` etait quasi TOUJOURS faux pour toute comparaison le meme jour, peu importe
+  // l'heure reelle — aucune mise a jour (tickets, ad_leads, chat/cost) n'etait donc jamais
+  // detectee par le polling. On normalise ici au meme format que SQLite avant de comparer.
+  const since = sqlDateTime(new Date(sinceRaw));
   const role = req.user.role;
   let newTickets = [];
   if (role === 'manager' || role === 'owner') {
@@ -845,6 +950,9 @@ router.get('/poll', requireAuth, (req, res) => {
   }
   let newChatMessages = [];
   if (role === 'owner' || role === 'setter' || role === 'closer') {
+    // OR updated_at > ? : capte aussi les cost_request existants dont seul le prix a change
+    // (setCostRequestPrice ne cree pas un nouveau message, il UPDATE l'existant) — sans ce
+    // deuxieme filtre, un closer reste sur le canal Cost ne voyait jamais le prix apparaitre.
     newChatMessages = query(
       `SELECT m.*,
          u.first_name AS sender_first_name, u.last_name AS sender_last_name,
@@ -852,9 +960,9 @@ router.get('/poll', requireAuth, (req, res) => {
        FROM chat_messages m
        LEFT JOIN users u ON m.sender_id = u.id
        LEFT JOIN roles r ON u.role_id = r.id
-       WHERE m.created_at > ?
+       WHERE m.created_at > ? OR m.updated_at > ?
        ORDER BY m.created_at ASC`,
-      [since]
+      [since, since]
     );
     newChatMessages.forEach(m => {
       try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
