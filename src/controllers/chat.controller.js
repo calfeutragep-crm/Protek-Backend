@@ -114,7 +114,10 @@ function setCostRequestPrice(req, res) {
   if (!parsed || parsed <= 0) return res.status(400).json({ error: 'Valid cost required.' });
   const msg = get('SELECT id FROM chat_messages WHERE id = ? AND type = ?', [id, 'cost_request']);
   if (!msg) return res.status(404).json({ error: 'Cost request not found.' });
-  run(`UPDATE chat_messages SET cost = ?, cost_status = 'priced' WHERE id = ?`, [parsed, id]);
+  // updated_at est ce que /poll surveille pour detecter ce changement (created_at ne bouge
+  // jamais) — sans ca, le closer qui reste sur le canal Cost ne verrait le prix qu'apres avoir
+  // change de canal ou rechargé l'app.
+  run(`UPDATE chat_messages SET cost = ?, cost_status = 'priced', updated_at = datetime('now') WHERE id = ?`, [parsed, id]);
   const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
   try { saved.photo_urls = JSON.parse(saved.photo_urls || '[]'); } catch { saved.photo_urls = []; }
   return res.json({ message: 'Cost updated.', chatMessage: saved });
