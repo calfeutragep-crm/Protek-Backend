@@ -99,8 +99,36 @@ function me(req, res) {
     email: u.email,
     phone: u.phone,
     role: u.role,
+    secondaryRole: u.secondary_role || null,
     status: u.status,
   });
 }
 
-module.exports = { register, login, me };
+// Echange le role actif <-> le role "en reserve" pour l'utilisateur courant. Appele par le
+// frontend quand quelqu'un ayant un acces double CRM choisit au login le CRM qui NE correspond
+// PAS a son role actuellement actif (voir roleCrmMode() cote frontend) : ca lui permet de
+// "changer de CRM" sans creer une deuxieme session/token — requireAuth relit toujours role_id
+// depuis la DB a chaque requete, donc l'echange prend effet immediatement partout.
+function swapCrmRole(req, res) {
+  const u = req.user;
+  if (!u.secondary_role_id) {
+    return res.status(400).json({ error: 'No secondary CRM access assigned.' });
+  }
+  const current = get('SELECT role_id, secondary_role_id FROM users WHERE id = ?', [u.id]);
+  if (!current || !current.secondary_role_id) {
+    return res.status(400).json({ error: 'No secondary CRM access assigned.' });
+  }
+  run('UPDATE users SET role_id = ?, secondary_role_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
+    [current.secondary_role_id, current.role_id, u.id]);
+  const updated = get(
+    `SELECT r.name as role, sr.name as secondary_role
+     FROM users u
+     LEFT JOIN roles r  ON u.role_id = r.id
+     LEFT JOIN roles sr ON u.secondary_role_id = sr.id
+     WHERE u.id = ?`,
+    [u.id]
+  );
+  return res.json({ role: updated.role, secondaryRole: updated.secondary_role || null });
+}
+
+module.exports = { register, login, me, swapCrmRole };

@@ -4,11 +4,14 @@ const { query, get, run } = require('../utils/database');
 function getUsers(req, res) {
   const { status } = req.query;
   let sql = `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.status, u.created_at,
+              u.secondary_role_id,
               r.name as role, r.label as role_label,
-              rr.name as requested_role, rr.label as requested_role_label
+              rr.name as requested_role, rr.label as requested_role_label,
+              sr.name as secondary_role, sr.label as secondary_role_label
              FROM users u
              LEFT JOIN roles r ON u.role_id = r.id
              LEFT JOIN roles rr ON u.requested_role_id = rr.id
+             LEFT JOIN roles sr ON u.secondary_role_id = sr.id
              WHERE r.name != 'owner' OR r.name IS NULL`;
   const params = [];
   if (status) { sql += ' AND u.status = ?'; params.push(status); }
@@ -28,16 +31,16 @@ function getUser(req, res) {
 
 function approveUser(req, res) {
   const { id } = req.params;
-  const { roleId } = req.body;
+  const { roleId, secondaryRoleId } = req.body;
   const u = get('SELECT * FROM users WHERE id = ?', [id]);
   if (!u) return res.status(404).json({ error: 'User not found.' });
   const targetRoleId = roleId || u.requested_role_id || 2;
-  run('UPDATE users SET status = ?, role_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
-    ['active', targetRoleId, id]);
+  run('UPDATE users SET status = ?, role_id = ?, secondary_role_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
+    ['active', targetRoleId, secondaryRoleId || null, id]);
   run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)',
     [uuid(), id, 'Your account has been approved! You can now log in.']);
   run('INSERT INTO audit_logs (id, actor_id, action, target_id, details) VALUES (?, ?, ?, ?, ?)',
-    [uuid(), req.user.id, 'approve_user', id, JSON.stringify({ roleId: targetRoleId })]);
+    [uuid(), req.user.id, 'approve_user', id, JSON.stringify({ roleId: targetRoleId, secondaryRoleId: secondaryRoleId || null })]);
   return res.json({ message: 'User approved.' });
 }
 
@@ -71,10 +74,12 @@ function reactivateUser(req, res) {
 
 function updateUser(req, res) {
   const { id } = req.params;
-  const { roleId, status } = req.body;
+  const { roleId, status, secondaryRoleId } = req.body;
   const sets = []; const params = [];
   if (roleId !== undefined) { sets.push('role_id = ?'); params.push(roleId); }
   if (status !== undefined) { sets.push('status = ?'); params.push(status); }
+  // secondaryRoleId: null/'' efface l'acces CRM secondaire (retire la reserve), sinon l'assigne.
+  if (secondaryRoleId !== undefined) { sets.push('secondary_role_id = ?'); params.push(secondaryRoleId || null); }
   if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
   sets.push("updated_at = datetime('now')");
   params.push(id);
