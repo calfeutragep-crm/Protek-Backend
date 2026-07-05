@@ -333,6 +333,11 @@ function migrateNewColumns() {
     // POST /auth/swap-crm-role : quand l'utilisateur choisit au login le CRM correspondant a
     // sa reserve, le serveur echange role_id <-> secondary_role_id.
     { table: 'users',                column: 'secondary_role_id',   def: 'INTEGER REFERENCES roles(id)' },
+    // chat_messages n'avait pas de colonne updated_at — le /poll d'un closer ne detectait donc
+    // jamais qu'un cost_request existant venait de recevoir son prix (setCostRequestPrice ne
+    // faisait qu'un UPDATE, invisible pour une requete filtrant sur created_at). Voir aussi le
+    // WHERE du poll de chat_messages plus bas et setCostRequestPrice() dans chat.controller.js.
+    { table: 'chat_messages',        column: 'updated_at',          def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
