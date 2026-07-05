@@ -4,7 +4,7 @@ const multer = require('multer');
 const { v4: uuid } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 
-const { register, login, me } = require('../controllers/auth.controller');
+const { register, login, me, swapCrmRole } = require('../controllers/auth.controller');
 const {
   getUsers, getUser, approveUser, rejectUser, suspendUser, reactivateUser, updateUser,
   getRoles, getPermissions, getRolePermissions, updateRolePermissions,
@@ -186,6 +186,9 @@ function computeLeaderboard() {
 router.post('/auth/register', registerLimiter, register);
 router.post('/auth/login',    loginLimiter,    login);
 router.get ('/auth/me',       requireAuth,     me);
+// Echange le role actif <-> le role "en reserve" (acces CRM secondaire) — voir
+// swapCrmRole() dans auth.controller.js pour le detail du mecanisme.
+router.post('/auth/swap-crm-role', requireAuth, swapCrmRole);
 
 // Plafond par requete relativement genereux (le frontend envoie desormais les photos par lots —
 // voir uploadPhotosBatched() cote client — donc un closer qui selectionne un nombre illimite de
