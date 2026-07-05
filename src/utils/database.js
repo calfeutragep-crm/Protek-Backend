@@ -327,6 +327,12 @@ function migrateNewColumns() {
     { table: 'deals',                column: 'postal',              def: 'TEXT' },
     { table: 'installation_tickets', column: 'city',                def: 'TEXT' },
     { table: 'installation_tickets', column: 'postal',              def: 'TEXT' },
+    // Acces CRM secondaire — permet a un membre (ex: closer porte-a-porte) d'avoir AUSSI un
+    // role dans l'autre CRM (ex: lead_closer). Un seul role est "actif" (role_id, celui qui
+    // determine les permissions serveur) a la fois ; l'autre reste "en reserve" ici. Voir
+    // POST /auth/swap-crm-role : quand l'utilisateur choisit au login le CRM correspondant a
+    // sa reserve, le serveur echange role_id <-> secondary_role_id.
+    { table: 'users',                column: 'secondary_role_id',   def: 'INTEGER REFERENCES roles(id)' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
