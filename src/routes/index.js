@@ -187,7 +187,11 @@ router.post('/auth/register', registerLimiter, register);
 router.post('/auth/login',    loginLimiter,    login);
 router.get ('/auth/me',       requireAuth,     me);
 
-router.post('/upload', requireAuth, upload.array('photos', 10), async (req, res) => {
+// Plafond par requete relativement genereux (le frontend envoie desormais les photos par lots —
+// voir uploadPhotosBatched() cote client — donc un closer qui selectionne un nombre illimite de
+// photos n'est jamais bloque : il envoie simplement plusieurs requetes successives de 15 photos
+// max chacune). Ce plafond protege uniquement la memoire du serveur pour UNE requete individuelle.
+router.post('/upload', requireAuth, upload.array('photos', 20), async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded.' });
   }
