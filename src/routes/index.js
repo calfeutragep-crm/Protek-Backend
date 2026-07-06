@@ -620,7 +620,10 @@ router.patch('/leads-crm/cost-requests/:id/cost', requireAuth, requireOwner, (re
 // plutot que de dupliquer les lignes. Une fois qu'un deal existe, le meme installation_ticket est
 // cree par createTicketFromDeal() peu importe l'origine (voir POST /deals) : le pipeline
 // d'installation est deja unifie, cette route ne fait qu'exposer le tout regroupe et etiquete.
-router.get('/database', requireAuth, requireOwner, (req, res) => {
+// Construit la liste unifiee de "rows" (porte-a-porte + marketing + deals orphelins) partagee par
+// GET /database (owner, vue complete) et GET /leads-crm/database (marketing, vue filtree). Extrait
+// en fonction a part pour eviter de dupliquer ~200 lignes de logique entre les deux routes.
+function buildDatabaseRows() {
   function parseUrls(raw) {
     try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
   }
@@ -845,6 +848,20 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
   });
 
   rows.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return rows;
+}
+
+router.get('/database', requireAuth, requireOwner, (req, res) => {
+  return res.json(buildDatabaseRows());
+});
+
+// GET /leads-crm/database — meme format que /database (voir buildDatabaseRows), mais filtre pour
+// ne renvoyer QUE les leads marketing (crmType === 'marketing') : le porte-a-porte n'y apparait
+// jamais. Ouvert a owner/lead_marketing/lead_closer (voir requireLeadsCrmAccess) — le frontend ne
+// l'utilise actuellement que pour le role marketing, mais l'acces suit le meme perimetre que le
+// reste du Leads CRM.
+router.get('/leads-crm/database', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const rows = buildDatabaseRows().filter(r => r.crmType === 'marketing');
   return res.json(rows);
 });
 
