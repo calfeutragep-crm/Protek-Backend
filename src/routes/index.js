@@ -40,6 +40,10 @@ const upload = multer({
 const router = express.Router();
 const loginLimiter    = rateLimit({ windowMs: 15*60*1000, max: 10 });
 const registerLimiter = rateLimit({ windowMs: 60*60*1000, max: 5  });
+// Webhook public (pas de session/JWT possible depuis Zapier/Meta/Google) — proteger par cle
+// partagee (voir POST /webhooks/ad-leads) plutot que par volume seul, mais on garde un plafond
+// large au cas ou une source enverrait des doublons/retries en rafale.
+const webhookLimiter  = rateLimit({ windowMs: 60*1000, max: 60 });
 
 function uploadToCloudinary(buffer, originalname, folder) {
   return new Promise((resolve, reject) => {
@@ -508,16 +512,16 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
   return res.json(rows);
 });
 
-router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
-  const { source, firstName, lastName, phone, email, notes } = req.body;
-  if (!firstName || !lastName || !phone) {
-    return res.status(400).json({ error: 'firstName, lastName, phone required.' });
-  }
+// Coeur partage entre la creation manuelle (POST /leads-crm/leads, un membre de l'equipe connecte)
+// et l'ingestion automatique (POST /webhooks/ad-leads, une source externe comme Zapier relayant
+// Facebook/Instagram/Google) : insere le lead marketing et notifie les lead closers actifs.
+// createdBy est null pour un lead venu d'un webhook (pas d'utilisateur CRM a l'origine).
+function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy }) {
   const id = uuid();
   run(
     `INSERT INTO ad_leads (id, source, first_name, last_name, phone, email, notes, status, created_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)`,
-    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, req.user.id]
+    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null]
   );
   // Notifie tous les lead closers actifs (best-effort — n'echoue jamais la creation du lead).
   const closers = query(
@@ -536,7 +540,61 @@ router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, 
       text: `Un nouveau lead vient d'arriver dans la queue.\n\nSource: ${source || 'Autre'}\nNom: ${firstName} ${lastName}\nTelephone: ${phone}\nEmail: ${email || '—'}\nNotes: ${notes || '—'}\n\nConnectez-vous au Leads CRM pour le prendre en charge.`,
     }).catch(() => {});
   });
+  return id;
+}
+
+router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
+  const { source, firstName, lastName, phone, email, notes } = req.body;
+  if (!firstName || !lastName || !phone) {
+    return res.status(400).json({ error: 'firstName, lastName, phone required.' });
+  }
+  const id = insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy: req.user.id });
   return res.status(201).json({ message: 'Lead created.', id });
+});
+
+// POST /webhooks/ad-leads — point d'entree PUBLIC (aucune session CRM possible depuis Zapier/Meta/
+// Google) pour l'ingestion automatique des leads publicitaires. Protege par une cle partagee
+// (LEADS_WEBHOOK_SECRET, voir variables Railway) passee en query (?key=...) ou header
+// x-webhook-secret — jamais par un compte utilisateur. Accepte plusieurs alias de champs car
+// chaque plateforme (Facebook Lead Ads, Google Ads, Zapier) nomme ses champs differemment ; on
+// tente aussi de scinder un nom complet ("fullName"/"name") si prenom/nom ne sont pas fournis
+// separement.
+router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
+  const configuredSecret = process.env.LEADS_WEBHOOK_SECRET;
+  if (!configuredSecret) {
+    return res.status(503).json({ error: 'Webhook non configure (LEADS_WEBHOOK_SECRET manquant).' });
+  }
+  const providedSecret = req.query.key || req.headers['x-webhook-secret'];
+  if (providedSecret !== configuredSecret) {
+    return res.status(401).json({ error: 'Cle webhook invalide.' });
+  }
+
+  const b = req.body || {};
+  let firstName = b.firstName || b.first_name || '';
+  let lastName  = b.lastName  || b.last_name  || '';
+  if (!firstName && !lastName) {
+    const full = (b.fullName || b.full_name || b.name || '').trim();
+    if (full) {
+      const parts = full.split(/\s+/);
+      firstName = parts.shift() || '';
+      lastName = parts.join(' ') || '';
+    }
+  }
+  const phone = b.phone || b.phone_number || b.phoneNumber || '';
+  const email = b.email || b.email_address || b.emailAddress || null;
+  const source = b.source || b.platform || 'Facebook';
+  const notes  = b.notes || b.message || null;
+
+  if (!firstName || !phone) {
+    return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
+  }
+  try {
+    const id = insertAdLead({ source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null });
+    return res.status(201).json({ message: 'Lead created.', id });
+  } catch (e) {
+    console.error('webhook ad-leads error', e);
+    return res.status(500).json({ error: 'Insertion echouee.' });
+  }
 });
 
 router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, res) => {
@@ -855,11 +913,19 @@ router.get('/database', requireAuth, requireOwner, (req, res) => {
   return res.json(buildDatabaseRows());
 });
 
+// GET /database/d2d — meme format, mais scope au porte-a-porte uniquement (exclut crmType ===
+// 'marketing') : c'est la Base que l'owner voit quand il est dans le CRM Porte-a-Porte ("admin
+// CRM"), pour que les deux CRM restent des vues completement separees, symetriques avec
+// /leads-crm/database ci-dessous.
+router.get('/database/d2d', requireAuth, requireOwner, (req, res) => {
+  const rows = buildDatabaseRows().filter(r => r.crmType !== 'marketing');
+  return res.json(rows);
+});
+
 // GET /leads-crm/database — meme format que /database (voir buildDatabaseRows), mais filtre pour
 // ne renvoyer QUE les leads marketing (crmType === 'marketing') : le porte-a-porte n'y apparait
-// jamais. Ouvert a owner/lead_marketing/lead_closer (voir requireLeadsCrmAccess) — le frontend ne
-// l'utilise actuellement que pour le role marketing, mais l'acces suit le meme perimetre que le
-// reste du Leads CRM.
+// jamais. Ouvert a owner/lead_marketing/lead_closer (voir requireLeadsCrmAccess) — utilise par le
+// role marketing ET par l'owner quand il est dans le CRM Leads.
 router.get('/leads-crm/database', requireAuth, requireLeadsCrmAccess, (req, res) => {
   const rows = buildDatabaseRows().filter(r => r.crmType === 'marketing');
   return res.json(rows);
