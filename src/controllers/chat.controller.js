@@ -1,5 +1,6 @@
 const { v4: uuid } = require('uuid');
 const { query, get, run } = require('../utils/database');
+const { notifyRole } = require('../utils/notify');
 
 const DEFAULT_CHANNEL_NAME = 'Team Rive-Sud';
 
@@ -90,6 +91,11 @@ function postChatMessage(req, res) {
     );
     const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
     try { saved.photo_urls = JSON.parse(saved.photo_urls || '[]'); } catch { saved.photo_urls = []; }
+    // Le closer veut etre notifie de toute nouvelle demande de prix (canal Cost) — voir demande
+    // utilisateur "chats, incluant les cost chats". On exclut l'auteur (souvent un closer
+    // lui-meme qui vient d'envoyer sa propre demande).
+    notifyRole('closer', `📋 [Porte-à-porte] Nouvelle demande de prix — ${clientName || 'Client'}`,
+      { title: '📋 Demande de prix', body: clientName || 'Nouvelle demande', url: '/' }, req.user.id);
     return res.status(201).json({ message: 'Cost request sent.', id, chatMessage: saved });
   }
 
@@ -101,6 +107,12 @@ function postChatMessage(req, res) {
     [id, req.user.id, channelId, trimmed.slice(0, 1000), imageUrl || null]
   );
   const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
+  // Notifie les closers de tout nouveau message de chat general — voir demande utilisateur
+  // "chats generaux". On exclut l'auteur du message.
+  const senderName = req.user.first_name ? `${req.user.first_name}` : 'Quelqu\'un';
+  const preview = trimmed ? trimmed.slice(0, 80) : (imageUrl ? '📷 Photo' : '');
+  notifyRole('closer', `💬 [Porte-à-porte] ${senderName}: ${preview}`,
+    { title: '💬 Nouveau message', body: `${senderName}: ${preview}`, url: '/' }, req.user.id);
   return res.status(201).json({ message: 'Sent.', id, chatMessage: saved });
 }
 
