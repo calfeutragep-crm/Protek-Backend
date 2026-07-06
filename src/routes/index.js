@@ -514,8 +514,13 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 
 // Coeur partage entre la creation manuelle (POST /leads-crm/leads, un membre de l'equipe connecte)
 // et l'ingestion automatique (POST /webhooks/ad-leads, une source externe comme Zapier relayant
-// Facebook/Instagram/Google) : insere le lead marketing et notifie les lead closers actifs.
+// Facebook/Instagram/Google) : insere le lead marketing et notifie l'equipe Leads CRM.
 // createdBy est null pour un lead venu d'un webhook (pas d'utilisateur CRM a l'origine).
+//
+// Notifie a la fois les lead closers (qui doivent contacter le lead au plus vite) ET le role
+// marketing (qui a paye pour le lead et veut voir en temps reel que la pub convertit) — les deux
+// recoivent une notification in-app ET un email, pour maximiser les chances que quelqu'un
+// contacte le lead rapidement meme si l'un des deux rate la notification in-app.
 function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy }) {
   const id = uuid();
   run(
@@ -523,13 +528,13 @@ function insertAdLead({ source, firstName, lastName, phone, email, notes, create
      VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)`,
     [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null]
   );
-  // Notifie tous les lead closers actifs (best-effort — n'echoue jamais la creation du lead).
-  const closers = query(
-    `SELECT u.id, u.first_name, u.email, u.notify_email FROM users u
+  // Notifie tous les lead closers ET marketing actifs (best-effort — n'echoue jamais la creation du lead).
+  const recipients = query(
+    `SELECT u.id, u.first_name, u.email, u.notify_email, r.name AS role_name FROM users u
      JOIN roles r ON u.role_id = r.id
-     WHERE r.name = 'lead_closer' AND u.status = 'active'`
+     WHERE r.name IN ('lead_closer', 'lead_marketing') AND u.status = 'active'`
   );
-  closers.forEach(c => {
+  recipients.forEach(c => {
     run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [
       uuid(), c.id, `🆕 Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     ]);
