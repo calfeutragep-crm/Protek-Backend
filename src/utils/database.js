@@ -245,6 +245,15 @@ function createSchema() {
       FOREIGN KEY(sender_id) REFERENCES users(id),
       FOREIGN KEY(channel_id) REFERENCES chat_channels(id)
     );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      endpoint TEXT NOT NULL UNIQUE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
     CREATE TABLE IF NOT EXISTS installation_tickets (
       id TEXT PRIMARY KEY,
       deal_id TEXT,
