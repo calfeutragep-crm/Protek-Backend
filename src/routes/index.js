@@ -17,7 +17,7 @@ const {
 } = require('../controllers/chat.controller');
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
-const { sendEmail } = require('../utils/email');
+const { sendPushToUser, VAPID_PUBLIC_KEY } = require('../utils/push');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -502,6 +502,37 @@ router.patch('/auth/notify-prefs', requireAuth, (req, res) => {
   return res.json({ message: 'Preferences updated.' });
 });
 
+// ── Notifications push (telephone) ──
+// Cle publique VAPID necessaire cote front pour pushManager.subscribe() — publique par design,
+// aucune authentification requise (elle ne sert a rien sans la cle privee cote serveur).
+router.get('/push/vapid-public-key', (req, res) => {
+  if (!VAPID_PUBLIC_KEY) return res.status(503).json({ error: 'Push not configured.' });
+  return res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+// Enregistre (ou met a jour) l'abonnement push de l'appareil courant pour l'utilisateur connecte.
+// Un utilisateur peut avoir plusieurs abonnements actifs (telephone + ordinateur) — on upsert sur
+// endpoint (unique par appareil/navigateur) plutot que de remplacer l'abonnement precedent.
+router.post('/push/subscribe', requireAuth, (req, res) => {
+  const { endpoint, keys } = req.body || {};
+  if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+    return res.status(400).json({ error: 'endpoint and keys.p256dh/keys.auth required.' });
+  }
+  run(
+    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`,
+    [uuid(), req.user.id, endpoint, keys.p256dh, keys.auth]
+  );
+  return res.status(201).json({ message: 'Subscribed.' });
+});
+
+router.delete('/push/subscribe', requireAuth, (req, res) => {
+  const { endpoint } = req.body || {};
+  if (!endpoint) return res.status(400).json({ error: 'endpoint required.' });
+  run('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?', [endpoint, req.user.id]);
+  return res.json({ message: 'Unsubscribed.' });
+});
+
 router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) => {
   const rows = query(
     `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
@@ -519,8 +550,9 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 //
 // Notifie a la fois les lead closers (qui doivent contacter le lead au plus vite) ET le role
 // marketing (qui a paye pour le lead et veut voir en temps reel que la pub convertit) — les deux
-// recoivent une notification in-app ET un email, pour maximiser les chances que quelqu'un
-// contacte le lead rapidement meme si l'un des deux rate la notification in-app.
+// recoivent une notification in-app ET une notification push (telephone), voir utils/push.js.
+// L'email a ete retire de ce flux (jamais vraiment configure — voir RESEND_API_KEY) au profit du
+// push, plus fiable pour "etre notifie tout de suite" sur telephone.
 function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy }) {
   const id = uuid();
   run(
@@ -530,7 +562,7 @@ function insertAdLead({ source, firstName, lastName, phone, email, notes, create
   );
   // Notifie tous les lead closers ET marketing actifs (best-effort — n'echoue jamais la creation du lead).
   const recipients = query(
-    `SELECT u.id, u.first_name, u.email, u.notify_email, r.name AS role_name FROM users u
+    `SELECT u.id, u.first_name, r.name AS role_name FROM users u
      JOIN roles r ON u.role_id = r.id
      WHERE r.name IN ('lead_closer', 'lead_marketing') AND u.status = 'active'`
   );
@@ -538,11 +570,10 @@ function insertAdLead({ source, firstName, lastName, phone, email, notes, create
     run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [
       uuid(), c.id, `🆕 Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     ]);
-    const to = c.notify_email || c.email;
-    sendEmail({
-      to,
-      subject: `Nouveau lead ${source || ''} — ${firstName} ${lastName}`,
-      text: `Un nouveau lead vient d'arriver dans la queue.\n\nSource: ${source || 'Autre'}\nNom: ${firstName} ${lastName}\nTelephone: ${phone}\nEmail: ${email || '—'}\nNotes: ${notes || '—'}\n\nConnectez-vous au Leads CRM pour le prendre en charge.`,
+    sendPushToUser(c.id, {
+      title: `🆕 Nouveau lead ${source || ''}`,
+      body: `${firstName} ${lastName} — ${phone}`,
+      url: '/',
     }).catch(() => {});
   });
   return id;
