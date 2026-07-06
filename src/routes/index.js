@@ -18,6 +18,13 @@ const {
 const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
 const { sendPushToUser, VAPID_PUBLIC_KEY } = require('../utils/push');
+const { notifyUser, notifyRole } = require('../utils/notify');
+
+// Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
+// d'oeil de quel CRM vient le lead/rendez-vous/deal — jamais d'ambiguite entre porte-a-porte et
+// Facebook/Instagram/Google (Lead CRM).
+const LABEL_D2D = '[Porte-à-porte]';
+const LABEL_LEADS = '[Lead CRM]';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -286,6 +293,14 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')`,
     [leadId, firstName, lastName, phone, email || null, address || null, city || null, postal || null, notes || null, setterId, closerId || null]
   );
+  // Un nouveau lead porte-a-porte concerne le closer assigne (s'il y en a un) ET l'owner —
+  // meme sans rendez-vous encore pris (voir aussi insertAdLead(), equivalent cote Lead CRM).
+  if (closerId) {
+    notifyUser(closerId, `🆕 ${LABEL_D2D} Nouveau lead: ${firstName} ${lastName} — ${phone}`,
+      { title: `🆕 Nouveau lead ${LABEL_D2D}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
+  }
+  notifyRole('owner', `🆕 ${LABEL_D2D} Nouveau lead: ${firstName} ${lastName} — ${phone}`,
+    { title: `🆕 Nouveau lead ${LABEL_D2D}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
   if (apptDate) {
     const apptId = uuid();
     run(
@@ -297,14 +312,14 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
     // Ton "hype" volontaire (gras/couleur cote frontend + emojis) pour motiver l'equipe en temps
     // reel ; voir aussi computeLeaderboard() pour le classement hebdomadaire correspondant.
     postSystemMessage(`🔥📅 NOUVEAU RDV BOOKÉ !\n${req.user.first_name} ${req.user.last_name} vient de décrocher un rendez-vous — ON CONTINUE COMME ÇA! 💪🚀`);
+    const setter = get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]);
+    const setterName = setter ? `${setter.first_name} ${setter.last_name}` : 'Un setter';
     if (closerId) {
-      const setter = get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]);
-      const setterName = setter ? `${setter.first_name} ${setter.last_name}` : 'Un setter';
-      run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [
-        uuid(), closerId,
-        `Nouveau RDV: ${firstName} ${lastName} le ${apptDate} — posé par ${setterName}`,
-      ]);
+      notifyUser(closerId, `📅 ${LABEL_D2D} Nouveau RDV: ${firstName} ${lastName} le ${apptDate} — posé par ${setterName}`,
+        { title: `📅 Nouveau RDV ${LABEL_D2D}`, body: `${firstName} ${lastName} — ${apptDate}`, url: '/' });
     }
+    notifyRole('owner', `📅 ${LABEL_D2D} RDV pris: ${firstName} ${lastName} le ${apptDate} — posé par ${setterName}`,
+      { title: `📅 RDV pris ${LABEL_D2D}`, body: `${firstName} ${lastName} — ${apptDate}`, url: '/' });
   }
   return res.status(201).json({ message: 'Lead created.', id: leadId });
 });
@@ -346,6 +361,15 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
     }
     const deal = get('SELECT * FROM deals WHERE appointment_id = ?', [id]);
     if (deal) createTicketFromDeal(deal);
+  }
+  // Le setter qui a pose ce rendez-vous veut savoir ce qu'il est devenu (ferme, perdu, no-show,
+  // etc.) — c'est son travail de prospection qui est en jeu. Notifie a CHAQUE changement de
+  // statut, quel qu'il soit (pas seulement Closed Won), voir demande utilisateur.
+  if (status !== undefined && appt.setter_id) {
+    const lead = appt.lead_id ? get('SELECT first_name, last_name FROM leads WHERE id = ?', [appt.lead_id]) : null;
+    const name = lead ? `${lead.first_name} ${lead.last_name}` : 'Client';
+    notifyUser(appt.setter_id, `📊 ${LABEL_D2D} Statut mis à jour — ${name}: ${status}`,
+      { title: `📊 Statut mis à jour ${LABEL_D2D}`, body: `${name}: ${status}`, url: '/' });
   }
   return res.json({ message: 'Appointment updated.' });
 });
@@ -418,6 +442,7 @@ router.post('/deals', requireAuth, (req, res) => {
   if (adLeadId) {
     run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [adLeadId]);
   }
+  const dealPrice = parseFloat(price) || 0;
   // Notification chat — aucune donnee client (pas de nom, prix, ou photo), juste
   // le compteur attribue au closer, avec le setter qui a pris le rendez-vous d'origine.
   // (Les deals issus du Leads CRM ne postent pas dans le chat porte-a-porte — sections isolees.)
@@ -431,6 +456,19 @@ router.post('/deals', requireAuth, (req, res) => {
       + (setterName ? `\n${setterName} +$300 🙌` : '')
       + `\nON EST EN FEU! 🔥`
     );
+    // Le setter qui a pose le rendez-vous d'origine, et l'owner, veulent savoir des qu'un deal
+    // porte-a-porte ferme (voir demande utilisateur : setter + admin notifies sur "deal ferme").
+    if (setterId) {
+      notifyUser(setterId, `💰 ${LABEL_D2D} Deal fermé: ${clientName} — $${dealPrice}`,
+        { title: `💰 Deal fermé ${LABEL_D2D}`, body: `${clientName} — $${dealPrice}`, url: '/' });
+    }
+    notifyRole('owner', `💰 ${LABEL_D2D} Deal fermé: ${clientName} — $${dealPrice}`,
+      { title: `💰 Deal fermé ${LABEL_D2D}`, body: `${clientName} — $${dealPrice}`, url: '/' });
+  } else {
+    // Deal issu du Lead CRM (marketing) — le role marketing et l'owner veulent savoir que ce
+    // lead publicitaire vient de se transformer en vente.
+    notifyRole(['lead_marketing', 'owner'], `💰 ${LABEL_LEADS} Lead fermé: ${clientName} — $${dealPrice}`,
+      { title: `💰 Lead fermé ${LABEL_LEADS}`, body: `${clientName} — $${dealPrice}`, url: '/' });
   }
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
@@ -548,11 +586,9 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 // Facebook/Instagram/Google) : insere le lead marketing et notifie l'equipe Leads CRM.
 // createdBy est null pour un lead venu d'un webhook (pas d'utilisateur CRM a l'origine).
 //
-// Notifie a la fois les lead closers (qui doivent contacter le lead au plus vite) ET le role
-// marketing (qui a paye pour le lead et veut voir en temps reel que la pub convertit) — les deux
-// recoivent une notification in-app ET une notification push (telephone), voir utils/push.js.
-// L'email a ete retire de ce flux (jamais vraiment configure — voir RESEND_API_KEY) au profit du
-// push, plus fiable pour "etre notifie tout de suite" sur telephone.
+// Notifie les lead closers (qui doivent contacter le lead au plus vite), le role marketing (qui a
+// paye pour le lead et veut voir en temps reel que la pub convertit), ET l'owner (visibilite
+// complete sur les deux CRM) — tous via notifyRole (in-app + push, voir utils/notify.js).
 function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy }) {
   const id = uuid();
   run(
@@ -560,22 +596,9 @@ function insertAdLead({ source, firstName, lastName, phone, email, notes, create
      VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)`,
     [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null]
   );
-  // Notifie tous les lead closers ET marketing actifs (best-effort — n'echoue jamais la creation du lead).
-  const recipients = query(
-    `SELECT u.id, u.first_name, r.name AS role_name FROM users u
-     JOIN roles r ON u.role_id = r.id
-     WHERE r.name IN ('lead_closer', 'lead_marketing') AND u.status = 'active'`
-  );
-  recipients.forEach(c => {
-    run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [
-      uuid(), c.id, `🆕 Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
-    ]);
-    sendPushToUser(c.id, {
-      title: `🆕 Nouveau lead ${source || ''}`,
-      body: `${firstName} ${lastName} — ${phone}`,
-      url: '/',
-    }).catch(() => {});
-  });
+  notifyRole(['lead_closer', 'lead_marketing', 'owner'],
+    `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
+    { title: `🆕 Nouveau lead ${LABEL_LEADS}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
   return id;
 }
 
@@ -660,6 +683,21 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
 
   params.push(id);
   run(`UPDATE ad_leads SET ${sets.join(', ')} WHERE id = ?`, params);
+
+  const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
+  // RDV pris sur un lead marketing — l'owner veut le savoir, comme cote porte-a-porte (voir
+  // POST /leads). Le closer qui vient de le prendre le sait deja (c'est son action), pas besoin
+  // de le renotifier lui-meme.
+  if (apptDate && !lead.appt_date) {
+    notifyRole('owner', `📅 ${LABEL_LEADS} RDV pris: ${leadName} le ${apptDate}`,
+      { title: `📅 RDV pris ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
+  }
+  // Lead marketing ferme (gagne ou perdu) — marketing (a paye pour ce lead) + owner veulent savoir.
+  if (status && TERMINAL_STATUSES.includes(status) && lead.status !== status) {
+    const verb = status === 'Closed Won' ? 'fermé' : (status === 'No Show' ? 'no-show' : 'perdu');
+    notifyRole(['lead_marketing', 'owner'], `💰 ${LABEL_LEADS} Lead ${verb}: ${leadName}`,
+      { title: `💰 Lead ${verb} ${LABEL_LEADS}`, body: leadName, url: '/' });
+  }
   return res.json({ message: 'Lead updated.' });
 });
 
