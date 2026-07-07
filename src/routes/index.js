@@ -19,6 +19,7 @@ const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
 const { sendPushToUser, VAPID_PUBLIC_KEY } = require('../utils/push');
 const { notifyUser, notifyRole } = require('../utils/notify');
+const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
 // d'oeil de quel CRM vient le lead/rendez-vous/deal — jamais d'ambiguite entre porte-a-porte et
@@ -441,6 +442,11 @@ router.post('/deals', requireAuth, (req, res) => {
   if (newDeal) createTicketFromDeal(newDeal);
   if (adLeadId) {
     run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [adLeadId]);
+    // Repousse vers GoHighLevel : marque l'opportunite correspondante "won". Fire-and-forget
+    // (voir ghlClient.js) — un souci cote GHL ne doit jamais retarder ou faire echouer la
+    // creation du deal cote Protek.
+    const closedAdLead = get('SELECT ghl_contact_id FROM ad_leads WHERE id = ?', [adLeadId]);
+    if (closedAdLead && closedAdLead.ghl_contact_id) markOpportunityWon(closedAdLead.ghl_contact_id);
   }
   const dealPrice = parseFloat(price) || 0;
   // Notification chat — aucune donnee client (pas de nom, prix, ou photo), juste
@@ -589,12 +595,12 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 // Notifie les lead closers (qui doivent contacter le lead au plus vite), le role marketing (qui a
 // paye pour le lead et veut voir en temps reel que la pub convertit), ET l'owner (visibilite
 // complete sur les deux CRM) — tous via notifyRole (in-app + push, voir utils/notify.js).
-function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy }) {
+function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy, ghlContactId }) {
   const id = uuid();
   run(
-    `INSERT INTO ad_leads (id, source, first_name, last_name, phone, email, notes, status, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)`,
-    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null]
+    `INSERT INTO ad_leads (id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?)`,
+    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null]
   );
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
@@ -643,12 +649,17 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   const email = b.email || b.email_address || b.emailAddress || null;
   const source = b.source || b.platform || 'Facebook';
   const notes  = b.notes || b.message || null;
+  // Id du contact GoHighLevel (merge tag {{contact.id}} cote workflow) — necessaire pour
+  // repousser plus tard les changements de statut vers GHL (voir ghlClient.js). Optionnel :
+  // les sources qui ne le fournissent pas (Meta/Google directs) continuent de fonctionner,
+  // simplement sans synchronisation retour.
+  const ghlContactId = b.contactId || b.contact_id || null;
 
   if (!firstName || !phone) {
     return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
   }
   try {
-    const id = insertAdLead({ source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null });
+    const id = insertAdLead({ source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null, ghlContactId });
     return res.status(201).json({ message: 'Lead created.', id });
   } catch (e) {
     console.error('webhook ad-leads error', e);
@@ -691,6 +702,11 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
   if (apptDate && !lead.appt_date) {
     notifyRole('owner', `📅 ${LABEL_LEADS} RDV pris: ${leadName} le ${apptDate}`,
       { title: `📅 RDV pris ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
+    // Repousse vers GoHighLevel : deplace l'opportunite correspondante vers l'etape
+    // CONFIRMATION du pipeline LEADS. Fire-and-forget (pas de await) — un souci cote GHL
+    // (token expire, opportunite introuvable) ne doit jamais retarder ou faire echouer la
+    // reponse au closer qui vient de booker le RDV. Voir ghlClient.js pour le detail.
+    if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
   }
   // Lead marketing ferme (gagne ou perdu) — marketing (a paye pour ce lead) + owner veulent savoir.
   if (status && TERMINAL_STATUSES.includes(status) && lead.status !== status) {
