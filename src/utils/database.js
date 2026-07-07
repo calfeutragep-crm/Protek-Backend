@@ -347,6 +347,11 @@ function migrateNewColumns() {
     // faisait qu'un UPDATE, invisible pour une requete filtrant sur created_at). Voir aussi le
     // WHERE du poll de chat_messages plus bas et setCostRequestPrice() dans chat.controller.js.
     { table: 'chat_messages',        column: 'updated_at',          def: 'TEXT' },
+    // Id du contact GoHighLevel a l'origine du lead (rempli par le webhook /webhooks/ad-leads
+    // quand la source est GHL) — permet de retrouver l'opportunite correspondante cote GHL et
+    // d'y repousser les changements de statut (RDV booke -> stage CONFIRMATION, deal signe ->
+    // won). Voir src/utils/ghlClient.js.
+    { table: 'ad_leads',              column: 'ghl_contact_id',      def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
