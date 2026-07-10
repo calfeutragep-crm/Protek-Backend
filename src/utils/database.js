@@ -198,6 +198,12 @@ function createSchema() {
       appt_date TEXT,
       appt_hour INTEGER,
       created_by TEXT,
+      city TEXT,
+      building_type TEXT,
+      calfeutrage_condition TEXT,
+      zones_to_seal TEXT,
+      project_details TEXT,
+      form_source TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(closer_id) REFERENCES users(id),
@@ -219,6 +225,20 @@ function createSchema() {
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id),
       FOREIGN KEY(closer_id) REFERENCES users(id)
+    );
+    -- Historique de notes horodatees sur un lead marketing (Leads CRM) — append-only, distinct
+    -- du champ ad_leads.notes (texte libre remplace a chaque PATCH). Permet aux lead
+    -- closers/marketing/owner de journaliser le suivi avant/apres un rendez-vous ou a n'importe
+    -- quelle etape, sans jamais perdre une entree precedente. Voir POST/GET
+    -- /leads-crm/leads/:id/notes.
+    CREATE TABLE IF NOT EXISTS ad_lead_notes (
+      id TEXT PRIMARY KEY,
+      ad_lead_id TEXT NOT NULL,
+      author_id TEXT,
+      body TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id),
+      FOREIGN KEY(author_id) REFERENCES users(id)
     );
     CREATE TABLE IF NOT EXISTS chat_channels (
       id TEXT PRIMARY KEY,
@@ -352,6 +372,22 @@ function migrateNewColumns() {
     // d'y repousser les changements de statut (RDV booke -> stage CONFIRMATION, deal signe ->
     // won). Voir src/utils/ghlClient.js.
     { table: 'ad_leads',              column: 'ghl_contact_id',      def: 'TEXT' },
+    // Champs du formulaire de qualification GHL ("Ville", "Type de bâtiment", "État du
+    // calfeutrage", "Zones à calfeutrer", "Détails du projet", "Source du formulaire" — voir
+    // Custom Fields > Additional Info cote GHL) : jusqu'ici seuls firstName/lastName/phone/email/
+    // source/notes/contactId etaient captes par le webhook /webhooks/ad-leads, ces champs de
+    // qualification etaient donc perdus a l'ingestion. Voir insertAdLead() et POST /webhooks/ad-leads.
+    { table: 'ad_leads',              column: 'city',                 def: 'TEXT' },
+    { table: 'ad_leads',              column: 'building_type',        def: 'TEXT' },
+    { table: 'ad_leads',              column: 'calfeutrage_condition', def: 'TEXT' },
+    { table: 'ad_leads',              column: 'zones_to_seal',        def: 'TEXT' },
+    { table: 'ad_leads',              column: 'project_details',      def: 'TEXT' },
+    { table: 'ad_leads',              column: 'form_source',          def: 'TEXT' },
+    // Image(s) de la soumission/quote televersee par le closer quand un lead passe a l'etape
+    // "Left Quote" du pipeline Leads CRM (voir AD_LEAD_STAGES cote front) — tableau JSON d'URLs
+    // Cloudinary, meme convention que deals.photo_urls. Reste attache et consultable au lead
+    // peu importe l'etape suivante (Closed Won/Lost) : jamais efface automatiquement.
+    { table: 'ad_leads',              column: 'quote_image_urls',    def: "TEXT DEFAULT '[]'" },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
