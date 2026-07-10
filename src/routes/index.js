@@ -604,8 +604,9 @@ function insertAdLead({
   run(
     `INSERT INTO ad_leads (
        id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id,
-       city, building_type, calfeutrage_condition, zones_to_seal, project_details, form_source
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       city, building_type, calfeutrage_condition, zones_to_seal, project_details, form_source,
+       qualification_exempt
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     [
       id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null,
       city || null, buildingType || null, calfeutrageCondition || null, zonesToSeal || null, projectDetails || null, formSource || null,
@@ -696,11 +697,32 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   }
 });
 
+// Verrou de qualification : un lead_closer ne peut pas deplacer un lead NON exempt (voir
+// qualification_exempt, migration database.js) vers un autre statut tant que la fiche de
+// qualification n'est pas complete (qualification_completed_at NULL). L'owner peut toujours
+// forcer un changement de statut en cas d'exception (voir requete utilisateur). Cette fonction
+// est aussi appelee par PATCH .../qualification pour re-verifier apres sauvegarde.
+function isQualificationBlocking(lead, actorRole) {
+  if (actorRole !== 'lead_closer') return false;
+  if (lead.qualification_exempt) return false;
+  if (lead.qualification_completed_at) return false;
+  return true;
+}
+const QUALIFICATION_LOCK_MESSAGE = 'Veuillez compléter la fiche de qualification avant de pouvoir déplacer ce lead vers un autre statut.';
+
 router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, res) => {
   const { id } = req.params;
   const { status, claim, apptDate, apptHour, notes, quoteImageUrls } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+  // Le verrou ne bloque que les VRAIS changements de statut (une valeur differente de l'actuel) —
+  // re-cliquer le statut deja actif (no-op) ou faire d'autres actions (claim, notes, RDV, quote)
+  // reste toujours permis meme fiche incomplete, sinon on empecherait meme de commencer a
+  // qualifier le lead (prendre le RDV fait partie de la fiche elle-meme, voir Q11).
+  if (status && status !== lead.status && isQualificationBlocking(lead, req.user.role)) {
+    return res.status(400).json({ error: QUALIFICATION_LOCK_MESSAGE });
+  }
 
   const sets = ["updated_at = datetime('now')"];
   const params = [];
@@ -751,6 +773,73 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
       { title: `💰 Lead ${verb} ${LABEL_LEADS}`, body: leadName, url: '/' });
   }
   return res.json({ message: 'Lead updated.' });
+});
+
+// ── Fiche de qualification (Leads CRM, appel initial du lead_closer) ──
+// Validee cote serveur (en plus du front) avant de marquer qualification_completed_at : c'est ce
+// timestamp, et lui seul, que le verrou de statut ci-dessus consulte. Tant que la validation
+// echoue, on sauvegarde quand meme les reponses fournies (permet un remplissage progressif
+// pendant l'appel) mais qualification_completed_at reste NULL — le lead reste bloque.
+router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const { id } = req.params;
+  const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+  const b = req.body || {};
+  const unitsCount = (b.unitsCount || '').toString().trim();
+  const buildingType = (b.buildingType || '').toString().trim();
+  const sealantColor = (b.sealantColor || '').toString().trim();
+  const sealantColorOther = (b.sealantColorOther || '').toString().trim();
+  const language = (b.language || '').toString().trim();
+  const reasons = Array.isArray(b.reasons) ? b.reasons.filter(Boolean) : [];
+  const reasonsOther = (b.reasonsOther || '').toString().trim();
+  const timeline = (b.timeline || '').toString().trim();
+  const otherRenovations = (b.otherRenovations || '').toString().trim();
+  const otherRenovationsWhich = (b.otherRenovationsWhich || '').toString().trim();
+  const renovationPriority = (b.renovationPriority || '').toString().trim();
+  const decisionMakerInvolved = (b.decisionMakerInvolved || '').toString().trim();
+  const apptNotBookedReason = (b.apptNotBookedReason || '').toString().trim();
+
+  const missing = [];
+  if (!unitsCount) missing.push('unitsCount');
+  if (!buildingType) missing.push('buildingType');
+  if (!sealantColor) missing.push('sealantColor');
+  if (sealantColor === 'Autre' && !sealantColorOther) missing.push('sealantColorOther');
+  if (!language) missing.push('language');
+  if (!reasons.length) missing.push('reasons');
+  if (reasons.includes('Autre') && !reasonsOther) missing.push('reasonsOther');
+  if (!timeline) missing.push('timeline');
+  if (otherRenovations !== 'Oui' && otherRenovations !== 'Non') missing.push('otherRenovations');
+  if (otherRenovations === 'Oui' && !otherRenovationsWhich) missing.push('otherRenovationsWhich');
+  if (otherRenovations === 'Oui' && !renovationPriority) missing.push('renovationPriority');
+  if (decisionMakerInvolved !== 'Oui' && decisionMakerInvolved !== 'Non') missing.push('decisionMakerInvolved');
+  // Q11 : soit un RDV est deja booke (lead.appt_date, via PATCH /leads-crm/leads/:id existant),
+  // soit la raison de non-booking est fournie ici — l'un des deux est obligatoire.
+  const apptResolved = !!lead.appt_date || !!apptNotBookedReason;
+  if (!apptResolved) missing.push('apptDateOrNotBookedReason');
+
+  const complete = missing.length === 0;
+
+  run(
+    `UPDATE ad_leads SET
+       qual_units_count = ?, qual_building_type = ?, qual_sealant_color = ?, qual_sealant_color_other = ?,
+       qual_language = ?, qual_reasons = ?, qual_reasons_other = ?, qual_timeline = ?,
+       qual_other_renovations = ?, qual_other_renovations_which = ?, qual_renovation_priority = ?,
+       qual_decision_maker_involved = ?, qual_appt_not_booked_reason = ?,
+       qualification_completed_at = CASE WHEN ? THEN datetime('now') ELSE qualification_completed_at END,
+       updated_at = datetime('now')
+     WHERE id = ?`,
+    [
+      unitsCount || null, buildingType || null, sealantColor || null, sealantColorOther || null,
+      language || null, reasons.length ? reasons.join(', ') : null, reasonsOther || null, timeline || null,
+      otherRenovations || null, otherRenovationsWhich || null, renovationPriority || null,
+      decisionMakerInvolved || null, apptNotBookedReason || null,
+      complete ? 1 : 0,
+      id,
+    ]
+  );
+
+  return res.json({ message: complete ? 'Qualification complétée.' : 'Qualification enregistrée (incomplète).', complete, missing });
 });
 
 // ── Notes horodatees (Leads CRM) — historique append-only distinct du champ ad_leads.notes
