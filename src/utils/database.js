@@ -388,6 +388,31 @@ function migrateNewColumns() {
     // Cloudinary, meme convention que deals.photo_urls. Reste attache et consultable au lead
     // peu importe l'etape suivante (Closed Won/Lost) : jamais efface automatiquement.
     { table: 'ad_leads',              column: 'quote_image_urls',    def: "TEXT DEFAULT '[]'" },
+    // Fiche de qualification obligatoire (Leads CRM uniquement) — remplie par le lead_closer
+    // pendant l'appel initial. Prefixees "qual_" pour ne jamais entrer en collision avec les
+    // champs du formulaire GHL ci-dessus (city/building_type/etc., remplis a l'ingestion, sujet
+    // different). Voir PATCH /leads-crm/leads/:id/qualification.
+    { table: 'ad_leads',              column: 'qual_units_count',              def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_building_type',            def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_sealant_color',            def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_sealant_color_other',      def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_language',                 def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_reasons',                  def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_reasons_other',            def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_timeline',                 def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_other_renovations',        def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_other_renovations_which',  def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_renovation_priority',      def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_decision_maker_involved',  def: 'TEXT' },
+    { table: 'ad_leads',              column: 'qual_appt_not_booked_reason',   def: 'TEXT' },
+    // Timestamp de completion de la fiche — NULL tant que non complete. C'est le SEUL flag
+    // consulte par le verrou de changement de statut (voir PATCH /leads-crm/leads/:id).
+    { table: 'ad_leads',              column: 'qualification_completed_at',    def: 'TEXT' },
+    // DEFAULT 1 (exempt) : SQLite applique ce defaut a TOUTES les lignes existantes au moment de
+    // la migration (leads deja dans le pipeline avant cette mise a jour) — ils ne sont jamais
+    // bloques retroactivement. insertAdLead() force explicitement 0 sur chaque NOUVEAU lead cree
+    // apres ce deploiement, qui devra donc etre qualifie avant de changer de statut.
+    { table: 'ad_leads',              column: 'qualification_exempt',          def: 'INTEGER DEFAULT 1' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
