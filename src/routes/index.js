@@ -584,6 +584,7 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
      LEFT JOIN users c ON l.closer_id = c.id
      ORDER BY l.created_at DESC`
   );
+  rows.forEach(r => { try { r.quote_image_urls = JSON.parse(r.quote_image_urls || '[]'); } catch { r.quote_image_urls = []; } });
   return res.json(rows);
 });
 
@@ -595,12 +596,20 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 // Notifie les lead closers (qui doivent contacter le lead au plus vite), le role marketing (qui a
 // paye pour le lead et veut voir en temps reel que la pub convertit), ET l'owner (visibilite
 // complete sur les deux CRM) — tous via notifyRole (in-app + push, voir utils/notify.js).
-function insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy, ghlContactId }) {
+function insertAdLead({
+  source, firstName, lastName, phone, email, notes, createdBy, ghlContactId,
+  city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource,
+}) {
   const id = uuid();
   run(
-    `INSERT INTO ad_leads (id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?)`,
-    [id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null]
+    `INSERT INTO ad_leads (
+       id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id,
+       city, building_type, calfeutrage_condition, zones_to_seal, project_details, form_source
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null,
+      city || null, buildingType || null, calfeutrageCondition || null, zonesToSeal || null, projectDetails || null, formSource || null,
+    ]
   );
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
@@ -654,12 +663,32 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   // les sources qui ne le fournissent pas (Meta/Google directs) continuent de fonctionner,
   // simplement sans synchronisation retour.
   const ghlContactId = b.contactId || b.contact_id || null;
+  // Champs du formulaire de qualification GHL (Custom Fields > Additional Info) — merge tags
+  // {{contact.ville}}, {{contact.type_de_btiment}}, {{contact.tat_du_calfeutrage}},
+  // {{contact.zones__calfeutrer}}, {{contact.dtails_du_projet}}, {{contact.source_du_formulaire}}.
+  // On accepte plusieurs alias par champ : le workflow GHL qui poste ici peut nommer ses clefs
+  // JSON soit comme le merge tag brut, soit en camelCase, soit avec le libelle exact du champ —
+  // meme logique defensive que firstName/phone/email ci-dessus.
+  const city = b.city || b.ville || b.Ville || null;
+  const buildingType = b.buildingType || b.building_type
+    || b.type_de_btiment || b.type_de_batiment || b['Type de bâtiment'] || null;
+  const calfeutrageCondition = b.calfeutrageCondition || b.calfeutrage_condition
+    || b.tat_du_calfeutrage || b.etat_du_calfeutrage || b['État du calfeutrage'] || null;
+  const zonesToSeal = b.zonesToSeal || b.zones_to_seal
+    || b.zones__calfeutrer || b.zones_a_calfeutrer || b['Zones à calfeutrer'] || null;
+  const projectDetails = b.projectDetails || b.project_details
+    || b.dtails_du_projet || b.details_du_projet || b['Détails du projet'] || null;
+  const formSource = b.formSource || b.form_source
+    || b.source_du_formulaire || b['Source du formulaire'] || null;
 
   if (!firstName || !phone) {
     return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
   }
   try {
-    const id = insertAdLead({ source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null, ghlContactId });
+    const id = insertAdLead({
+      source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null, ghlContactId,
+      city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource,
+    });
     return res.status(201).json({ message: 'Lead created.', id });
   } catch (e) {
     console.error('webhook ad-leads error', e);
@@ -669,7 +698,7 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
 
 router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, res) => {
   const { id } = req.params;
-  const { status, claim, apptDate, apptHour, notes } = req.body;
+  const { status, claim, apptDate, apptHour, notes, quoteImageUrls } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
@@ -683,6 +712,13 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate || null); }
   if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseInt(apptHour) : null); }
   if (notes !== undefined) { sets.push('notes = ?'); params.push(notes || null); }
+  // Image(s) de soumission/quote (etape "Left Quote") — le front envoie toujours le tableau
+  // complet (existant + nouvelles URLs Cloudinary), meme convention que deals.photo_urls : on
+  // remplace la colonne entiere plutot que d'append cote serveur.
+  if (quoteImageUrls !== undefined) {
+    sets.push('quote_image_urls = ?');
+    params.push(JSON.stringify(Array.isArray(quoteImageUrls) ? quoteImageUrls : []));
+  }
   const TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show'];
   if (status) {
     sets.push('status = ?'); params.push(status);
@@ -715,6 +751,42 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
       { title: `💰 Lead ${verb} ${LABEL_LEADS}`, body: leadName, url: '/' });
   }
   return res.json({ message: 'Lead updated.' });
+});
+
+// ── Notes horodatees (Leads CRM) — historique append-only distinct du champ ad_leads.notes
+// (texte libre, ecrase a chaque PATCH ci-dessus). Une entree n'est jamais modifiee ni supprimee
+// une fois creee : c'est un journal de suivi (avant/apres RDV, a n'importe quelle etape).
+router.get('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const { id } = req.params;
+  const lead = get('SELECT id FROM ad_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+  // Tri par created_at DESC puis rowid DESC : created_at n'a qu'une resolution a la seconde
+  // (datetime('now') SQLite), donc deux notes ajoutees dans la meme seconde departagent sur
+  // l'ordre d'insertion (rowid croissant) pour garantir que la plus recente reste toujours en
+  // premier, sans jamais perdre ou reordonner une note existante.
+  const rows = query(
+    `SELECT n.*, u.first_name || ' ' || u.last_name AS author_name
+     FROM ad_lead_notes n
+     LEFT JOIN users u ON n.author_id = u.id
+     WHERE n.ad_lead_id = ?
+     ORDER BY n.created_at DESC, n.rowid DESC`,
+    [id]
+  );
+  return res.json(rows);
+});
+
+router.post('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmAccess, (req, res) => {
+  const { id } = req.params;
+  const { body } = req.body || {};
+  if (!body || !String(body).trim()) return res.status(400).json({ error: 'body required.' });
+  const lead = get('SELECT id FROM ad_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+  const noteId = uuid();
+  run(
+    `INSERT INTO ad_lead_notes (id, ad_lead_id, author_id, body) VALUES (?, ?, ?, ?)`,
+    [noteId, id, req.user.id, String(body).trim()]
+  );
+  return res.status(201).json({ message: 'Note added.', id: noteId });
 });
 
 router.get('/leads-crm/cost-requests', requireAuth, requireLeadsCrmAccess, (req, res) => {
@@ -916,10 +988,16 @@ function buildDatabaseRows() {
       customerName: ((al.first_name || '') + ' ' + (al.last_name || '')).trim(),
       phone: al.phone || '', email: al.email || '',
       address: (deal && deal.address) || '',
-      // ad_leads n'a pas de champs ville/code postal distincts — collectes uniquement une fois
-      // le deal ferme (formulaire du closer), donc vides tant qu'aucun deal n'existe.
-      city: (deal && deal.city) || '', postal: (deal && deal.postal) || '',
+      // Ville vient du formulaire de qualification GHL (ad_leads.city) des l'ingestion ; le code
+      // postal, lui, n'est collecte qu'une fois le deal ferme (formulaire du closer), donc vide
+      // tant qu'aucun deal n'existe.
+      city: al.city || (deal && deal.city) || '', postal: (deal && deal.postal) || '',
       notes: al.notes || '',
+      buildingType: al.building_type || '',
+      calfeutrageCondition: al.calfeutrage_condition || '',
+      zonesToSeal: al.zones_to_seal || '',
+      projectDetails: al.project_details || '',
+      formSource: al.form_source || '',
       status,
       createdAt: al.created_at,
       apptDate: al.appt_date || null,
