@@ -685,6 +685,28 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   if (!firstName || !phone) {
     return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
   }
+
+  // Anti-doublon : depuis que notre site web (calfeutrageprotek.com) relaye lui-meme les leads
+  // vers ce webhook EN PLUS d'une automatisation GHL qui relaye parfois le meme contact, une seule
+  // soumission de formulaire peut declencher deux appels quasi simultanes pour la meme personne.
+  // On ignore une nouvelle insertion si un lead avec le meme telephone (normalise, sans espaces/
+  // tirets/parentheses) a deja ete cree dans les 5 dernieres minutes — assez court pour ne jamais
+  // bloquer une resoumission volontaire plus tard, assez long pour absorber la course entre les
+  // deux chemins d'ingestion. Voir memoire "protek-website-lead-pipeline" pour le contexte complet.
+  const normalizedPhone = phone.replace(/\D/g, '');
+  if (normalizedPhone) {
+    const recentDup = get(
+      `SELECT id FROM ad_leads
+       WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'-',''),' ',''),'(',''),')','') = ?
+         AND created_at >= datetime('now', '-5 minutes')
+       ORDER BY created_at DESC LIMIT 1`,
+      [normalizedPhone]
+    );
+    if (recentDup) {
+      return res.status(200).json({ message: 'Lead deja recu (doublon evite).', id: recentDup.id });
+    }
+  }
+
   try {
     const id = insertAdLead({
       source, firstName, lastName: lastName || '—', phone, email, notes, createdBy: null, ghlContactId,
