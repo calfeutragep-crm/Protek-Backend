@@ -453,6 +453,12 @@ function seedRoles() {
     [5, 'tech', 'Technician'],
     [6, 'lead_marketing', 'Marketing (Leads)'],
     [7, 'lead_closer', 'Lead Closer'],
+    // Role de supervision porte-a-porte : voit tout ce que les setters/closers voient (leads,
+    // RDV, deals, chat, "Vue de" pour agir a leur place) mais N'A PAS acces a la Base de donnees
+    // (requireOwner) ni a l'horaire des installations/tickets (requireTicketAccess), et son propre
+    // dashboard n'affiche jamais de montants $ — seulement des compteurs RDV pris/show/closing par
+    // vendeur, filtrables par semaine/annee. Voir requireChatAccess et /poll dans routes/index.js.
+    [8, 'team_leader_vente', 'Team Leader Vente'],
   ];
   const stmt = db.prepare('INSERT OR IGNORE INTO roles (id, name, label) VALUES (?, ?, ?)');
   roles.forEach(r => stmt.run(r));
