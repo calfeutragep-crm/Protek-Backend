@@ -104,8 +104,11 @@ function requireD2DOnly(req, res, next) {
 }
 function requireChatAccess(req, res, next) {
   const r = req.user.role;
-  if (r !== 'owner' && r !== 'setter' && r !== 'closer') {
-    return res.status(403).json({ error: 'Chat access restricted to setters, closers, and owner.' });
+  // team_leader_vente voit tout ce que les setters/closers voient (voir seedRoles) — inclut donc
+  // le chat d'equipe et le leaderboard, memes routes qu'eux. Reste exclu de /tickets et /database
+  // (non touchees ici, allowlist separee).
+  if (r !== 'owner' && r !== 'setter' && r !== 'closer' && r !== 'team_leader_vente') {
+    return res.status(403).json({ error: 'Chat access restricted to setters, closers, team leads, and owner.' });
   }
   next();
 }
@@ -1311,7 +1314,7 @@ router.get('/poll', requireAuth, (req, res) => {
     });
   }
   let newChatMessages = [];
-  if (role === 'owner' || role === 'setter' || role === 'closer') {
+  if (role === 'owner' || role === 'setter' || role === 'closer' || role === 'team_leader_vente') {
     // OR updated_at > ? : capte aussi les cost_request existants dont seul le prix a change
     // (setCostRequestPrice ne cree pas un nouveau message, il UPDATE l'existant) — sans ce
     // deuxieme filtre, un closer reste sur le canal Cost ne voyait jamais le prix apparaitre.
@@ -1333,7 +1336,7 @@ router.get('/poll', requireAuth, (req, res) => {
   // Leaderboard recalcule a chaque poll (toutes les 15s cote frontend) pour que le classement
   // reste toujours a jour sans action manuelle — voir computeLeaderboard() plus haut.
   let leaderboard = null;
-  if (role === 'owner' || role === 'setter' || role === 'closer') {
+  if (role === 'owner' || role === 'setter' || role === 'closer' || role === 'team_leader_vente') {
     leaderboard = computeLeaderboard();
   }
   let newAdLeads = [];
