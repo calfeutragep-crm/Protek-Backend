@@ -930,6 +930,11 @@ router.post('/leads-crm/cost-requests', requireAuth, requireLeadsCrmCloser, (req
       toolsNeeded || null, obstaclesToRemove || null, JSON.stringify(urls),
     ]
   );
+  // L'owner renseigne le prix (voir PATCH .../cost-requests/:id/cost, requireOwner) et n'etait
+  // jusqu'ici jamais notifie qu'une demande venait d'arriver — voir demande utilisateur "admins
+  // doivent avoir toutes les notifications de tout les leads cost demandes".
+  notifyRole('owner', `📋 ${LABEL_LEADS} Nouvelle demande de prix — ${clientName}`,
+    { title: '📋 Demande de prix', body: clientName, url: '/' }, req.user.id);
   return res.status(201).json({ message: 'Cost request sent.', id });
 });
 
