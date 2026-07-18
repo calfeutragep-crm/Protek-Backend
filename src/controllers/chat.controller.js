@@ -91,10 +91,12 @@ function postChatMessage(req, res) {
     );
     const saved = get('SELECT * FROM chat_messages WHERE id = ?', [id]);
     try { saved.photo_urls = JSON.parse(saved.photo_urls || '[]'); } catch { saved.photo_urls = []; }
-    // Le closer veut etre notifie de toute nouvelle demande de prix (canal Cost) — voir demande
-    // utilisateur "chats, incluant les cost chats". On exclut l'auteur (souvent un closer
-    // lui-meme qui vient d'envoyer sa propre demande).
-    notifyRole('closer', `📋 [Porte-à-porte] Nouvelle demande de prix — ${clientName || 'Client'}`,
+    // Le closer ET l'owner veulent etre notifies de toute nouvelle demande de prix (canal Cost)
+    // — voir demande utilisateur "chats, incluant les cost chats" puis "admins doivent avoir
+    // toutes les notifications de tout les leads cost demandes". L'owner est celui qui renseigne
+    // le prix (voir setCostRequestPrice, requireOwner) donc il doit le savoir immediatement, meme
+    // app fermee. On exclut l'auteur (souvent un closer lui-meme qui vient d'envoyer sa demande).
+    notifyRole(['closer', 'owner'], `📋 [Porte-à-porte] Nouvelle demande de prix — ${clientName || 'Client'}`,
       { title: '📋 Demande de prix', body: clientName || 'Nouvelle demande', url: '/' }, req.user.id);
     return res.status(201).json({ message: 'Cost request sent.', id, chatMessage: saved });
   }
