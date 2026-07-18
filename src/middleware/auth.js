@@ -3,11 +3,19 @@ const { get } = require('../utils/database');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'protek-dev-secret-change-in-production';
 
+// L'owner (admin) doit rester connecte en tout temps — pas de re-login force en pleine journee
+// qui le ferait rater des notifications/mises a jour live pendant que le token est expire (voir
+// demande utilisateur "admins doivent rester connectes en tout temps"). Les autres roles gardent
+// une session plus courte.
+function tokenExpiryFor(user) {
+  return user.role === 'owner' ? '90d' : '8h';
+}
+
 function signToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     JWT_SECRET,
-    { expiresIn: '8h' }
+    { expiresIn: tokenExpiryFor(user) }
   );
 }
 
