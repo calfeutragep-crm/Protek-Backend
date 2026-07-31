@@ -4,7 +4,7 @@ const multer = require('multer');
 const { v4: uuid } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 
-const { register, login, me, swapCrmRole } = require('../controllers/auth.controller');
+const { register, login, me, swapCrmRole, forgotPassword, resetPassword } = require('../controllers/auth.controller');
 const {
   getUsers, getUser, approveUser, rejectUser, suspendUser, reactivateUser, updateUser,
   getRoles, getPermissions, getRolePermissions, updateRolePermissions,
@@ -200,6 +200,11 @@ function computeLeaderboard() {
 
 router.post('/auth/register', registerLimiter, register);
 router.post('/auth/login',    loginLimiter,    login);
+// "Mot de passe oublie" — limite plus stricte que le login normal (5 demandes / 15 min / IP)
+// puisque chaque demande declenche un envoi d'email, pour eviter tout abus/spam d'une boite mail.
+const forgotPasswordLimiter = rateLimit({ windowMs: 15*60*1000, max: 5 });
+router.post('/auth/forgot-password', forgotPasswordLimiter, forgotPassword);
+router.post('/auth/reset-password',  forgotPasswordLimiter, resetPassword);
 router.get ('/auth/me',       requireAuth,     me);
 // Echange le role actif <-> le role "en reserve" (acces CRM secondaire) — voir
 // swapCrmRole() dans auth.controller.js pour le detail du mecanisme.
@@ -373,6 +378,11 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
     const lead = appt.lead_id ? get('SELECT first_name, last_name FROM leads WHERE id = ?', [appt.lead_id]) : null;
     const name = lead ? `${lead.first_name} ${lead.last_name}` : 'Client';
     notifyUser(appt.setter_id, `📊 ${LABEL_D2D} Statut mis à jour — ${name}: ${status}`,
+      { title: `📊 Statut mis à jour ${LABEL_D2D}`, body: `${name}: ${status}`, url: '/' });
+    // L'owner veut TOUTE notification importante, meme deconnecte/app fermee (voir demande
+    // utilisateur "notifications owner") — jusqu'ici seul le setter etait prevenu d'un changement
+    // de statut de RDV porte-a-porte.
+    notifyRole('owner', `📊 ${LABEL_D2D} Statut mis à jour — ${name}: ${status}`,
       { title: `📊 Statut mis à jour ${LABEL_D2D}`, body: `${name}: ${status}`, url: '/' });
   }
   return res.json({ message: 'Appointment updated.' });
@@ -727,10 +737,16 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
 // qualification n'est pas complete (qualification_completed_at NULL). L'owner peut toujours
 // forcer un changement de statut en cas d'exception (voir requete utilisateur). Cette fonction
 // est aussi appelee par PATCH .../qualification pour re-verifier apres sauvegarde.
-function isQualificationBlocking(lead, actorRole) {
+function isQualificationBlocking(lead, actorRole, targetStatus) {
   if (actorRole !== 'lead_closer') return false;
   if (lead.qualification_exempt) return false;
   if (lead.qualification_completed_at) return false;
+  // "Contacted" indique seulement qu'un premier contact a ete effectue, et "Not Qualified" est
+  // une sortie anticipee du pipeline (hors territoire, hors sujet, projet non admissible, etc.) —
+  // aucun des deux ne doit jamais etre bloque par la fiche de qualification. Elle ne redevient
+  // obligatoire qu'a partir de la prise de rendez-vous / des etapes suivantes. Voir demande
+  // utilisateur "permettre de deplacer un lead vers Contacte sans prequalification".
+  if (targetStatus === 'Contacted' || targetStatus === 'Not Qualified') return false;
   return true;
 }
 const QUALIFICATION_LOCK_MESSAGE = 'Veuillez compléter la fiche de qualification avant de pouvoir déplacer ce lead vers un autre statut.';
@@ -745,7 +761,7 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
   // re-cliquer le statut deja actif (no-op) ou faire d'autres actions (claim, notes, RDV, quote)
   // reste toujours permis meme fiche incomplete, sinon on empecherait meme de commencer a
   // qualifier le lead (prendre le RDV fait partie de la fiche elle-meme, voir Q11).
-  if (status && status !== lead.status && isQualificationBlocking(lead, req.user.role)) {
+  if (status && status !== lead.status && isQualificationBlocking(lead, req.user.role, status)) {
     return res.status(400).json({ error: QUALIFICATION_LOCK_MESSAGE });
   }
 
@@ -766,7 +782,10 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
     sets.push('quote_image_urls = ?');
     params.push(JSON.stringify(Array.isArray(quoteImageUrls) ? quoteImageUrls : []));
   }
-  const TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show'];
+  // "Not Qualified" est traite comme terminal (n'avance jamais automatiquement via apptDate,
+  // voir plus bas) mais a sa PROPRE notification (pas "ferme/perdu/no-show") — voir bloc dedie
+  // apres la sauvegarde.
+  const TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show', 'Not Qualified'];
   if (status) {
     sets.push('status = ?'); params.push(status);
   } else if (apptDate && !TERMINAL_STATUSES.includes(lead.status)) {
@@ -792,10 +811,17 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
     if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
   }
   // Lead marketing ferme (gagne ou perdu) — marketing (a paye pour ce lead) + owner veulent savoir.
-  if (status && TERMINAL_STATUSES.includes(status) && lead.status !== status) {
+  const CLOSED_TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show'];
+  if (status && CLOSED_TERMINAL_STATUSES.includes(status) && lead.status !== status) {
     const verb = status === 'Closed Won' ? 'fermé' : (status === 'No Show' ? 'no-show' : 'perdu');
     notifyRole(['lead_marketing', 'owner'], `💰 ${LABEL_LEADS} Lead ${verb}: ${leadName}`,
       { title: `💰 Lead ${verb} ${LABEL_LEADS}`, body: leadName, url: '/' });
+  }
+  // Lead marque "Non qualifie" — sortie anticipee du pipeline (hors territoire, hors sujet,
+  // projet non admissible, etc.), voir demande utilisateur "ajouter une section Non qualifies".
+  if (status === 'Not Qualified' && lead.status !== 'Not Qualified') {
+    notifyRole(['lead_marketing', 'owner'], `🚫 ${LABEL_LEADS} Lead non qualifié: ${leadName}`,
+      { title: `🚫 Lead non qualifié ${LABEL_LEADS}`, body: leadName, url: '/' });
   }
   return res.json({ message: 'Lead updated.' });
 });
