@@ -1,7 +1,16 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { v4: uuid } = require('uuid');
 const { get, run, query } = require('../utils/database');
 const { signToken } = require('../middleware/auth');
+const { sendEmail } = require('../utils/email');
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 60 minutes (exigence utilisateur)
+
+function hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 
 async function register(req, res) {
   try {
@@ -131,4 +140,85 @@ function swapCrmRole(req, res) {
   return res.json({ role: updated.role, secondaryRole: updated.secondary_role || null });
 }
 
-module.exports = { register, login, me, swapCrmRole };
+// POST /auth/forgot-password — etape 1/2 du flow "mot de passe oublie" (les deux CRM partagent
+// le meme ecran de connexion/le meme backend, voir renderLogin() cote frontend). Reponse
+// TOUJOURS identique que le compte existe ou non, pour ne jamais reveler par timing/contenu
+// quels emails sont enregistres — seul l'envoi (ou non) de l'email differe en interne.
+async function forgotPassword(req, res) {
+  try {
+    const { email } = req.body || {};
+    if (!email || !String(email).trim()) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    const user = get('SELECT id, first_name, email FROM users WHERE LOWER(email) = LOWER(?)', [String(email).trim()]);
+    if (user) {
+      // Un seul lien actif a la fois : toute demande d'un NOUVEAU lien invalide immediatement
+      // les precedents encore non utilises pour ce compte (pas seulement au moment du reset —
+      // voir aussi resetPassword ci-dessous pour l'invalidation post-usage).
+      run(`UPDATE password_reset_tokens SET used_at = datetime('now') WHERE user_id = ? AND used_at IS NULL`, [user.id]);
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+      run(
+        `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`,
+        [uuid(), user.id, hashResetToken(rawToken), expiresAt]
+      );
+      const base = (process.env.FRONTEND_URL || 'https://eclectic-sorbet-d63488.netlify.app').split(',')[0].trim();
+      const resetUrl = `${base}${base.includes('?') ? '&' : '?'}resetToken=${rawToken}`;
+      sendEmail({
+        to: user.email,
+        subject: 'Protek CRM — Réinitialisation de mot de passe',
+        text: `Bonjour ${user.first_name || ''},
+
+`
+          + `Une demande de réinitialisation de mot de passe a été faite pour ce compte.
+
+`
+          + `Cliquez sur le lien ci-dessous pour choisir un nouveau mot de passe (valide 60 minutes, usage unique) :
+${resetUrl}
+
+`
+          + `Si vous n'êtes pas à l'origine de cette demande, ignorez cet email — votre mot de passe actuel reste inchangé.
+
+`
+          + `— Protek CRM`,
+      }).catch(() => {});
+    }
+    return res.json({ message: "Si un compte existe avec cet email, un lien de réinitialisation vient d'être envoyé." });
+  } catch (e) {
+    console.error('forgotPassword error', e);
+    return res.status(500).json({ error: 'Une erreur est survenue.' });
+  }
+}
+
+// POST /auth/reset-password — etape 2/2. Le jeton brut recu par email est hashe puis compare au
+// hash stocke (jamais l'inverse) ; verifie usage unique (used_at) et expiration (expires_at)
+// avant d'ecrire le nouveau mot de passe.
+async function resetPassword(req, res) {
+  try {
+    const { token, password } = req.body || {};
+    if (!token || !password) {
+      return res.status(400).json({ error: 'Token and new password are required.' });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    const row = get('SELECT * FROM password_reset_tokens WHERE token_hash = ?', [hashResetToken(String(token))]);
+    if (!row || row.used_at) {
+      return res.status(400).json({ error: 'Ce lien de réinitialisation est invalide ou a déjà été utilisé.' });
+    }
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'Ce lien de réinitialisation a expiré. Demandez-en un nouveau.' });
+    }
+    const hash = await bcrypt.hash(String(password), 12);
+    run(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`, [hash, row.user_id]);
+    // Usage unique + invalide tous les AUTRES liens actifs du meme compte (exigence: apres
+    // reinitialisation, tous les anciens liens deviennent invalides).
+    run(`UPDATE password_reset_tokens SET used_at = datetime('now') WHERE user_id = ? AND used_at IS NULL`, [row.user_id]);
+    return res.json({ message: 'Mot de passe réinitialisé. Vous pouvez maintenant vous connecter.' });
+  } catch (e) {
+    console.error('resetPassword error', e);
+    return res.status(500).json({ error: 'Une erreur est survenue.' });
+  }
+}
+
+module.exports = { register, login, me, swapCrmRole, forgotPassword, resetPassword };
