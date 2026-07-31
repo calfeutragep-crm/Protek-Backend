@@ -274,6 +274,20 @@ function createSchema() {
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(user_id) REFERENCES users(id)
     );
+    -- Jetons de reinitialisation de mot de passe ("mot de passe oublie", les deux CRM). Le
+    -- jeton BRUT n'est JAMAIS stocke — seul son hash SHA-256 (token_hash) l'est, comme un mot de
+    -- passe, pour qu'une fuite de la base ne permette pas de rejouer un lien actif. Usage unique
+    -- (used_at) + expiration courte (expires_at, 60 minutes, calculee cote controleur) : voir
+    -- POST /auth/forgot-password et /auth/reset-password dans auth.controller.js.
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
     CREATE TABLE IF NOT EXISTS installation_tickets (
       id TEXT PRIMARY KEY,
       deal_id TEXT,
