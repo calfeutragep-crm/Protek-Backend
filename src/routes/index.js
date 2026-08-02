@@ -315,7 +315,7 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
     run(
       `INSERT INTO appointments (id, lead_id, setter_id, closer_id, appt_date, appt_hour, status, notes)
        VALUES (?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
-      [apptId, leadId, setterId, closerId || null, apptDate, parseInt(apptHour) || 14, notes || null]
+      [apptId, leadId, setterId, closerId || null, apptDate, parseFloat(apptHour) || 14, notes || null]
     );
     // Notification chat — aucune donnee client, juste le compteur attribue au setter.
     // Ton "hype" volontaire (gras/couleur cote frontend + emojis) pour motiver l'equipe en temps
@@ -358,7 +358,7 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const params = [];
   if (status !== undefined)   { sets.push('status = ?');    params.push(status); }
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate); }
-  if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(parseInt(apptHour)); }
+  if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(parseFloat(apptHour)); }
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     params.push(id);
@@ -773,7 +773,7 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
     sets.push('contacted_at = ?'); params.push(new Date().toISOString());
   }
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate || null); }
-  if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseInt(apptHour) : null); }
+  if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseFloat(apptHour) : null); }
   if (notes !== undefined) { sets.push('notes = ?'); params.push(notes || null); }
   // Image(s) de soumission/quote (etape "Left Quote") — le front envoie toujours le tableau
   // complet (existant + nouvelles URLs Cloudinary), meme convention que deals.photo_urls : on
