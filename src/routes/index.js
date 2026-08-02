@@ -420,7 +420,7 @@ router.post('/deals', requireAuth, (req, res) => {
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
   const dealId = uuid();
-  const closerId = closerIdOverride || (['closer', 'lead_closer'].includes(req.user.role) ? req.user.id : null);
+  const closerId = closerIdOverride || (['closer', 'lead_closer', 'team_leader_vente'].includes(req.user.role) ? req.user.id : null);
   let setterId = setterIdOverride || null;
   if (!setterId && appointmentId) {
     const appt = get('SELECT setter_id FROM appointments WHERE id = ?', [appointmentId]);
