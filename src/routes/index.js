@@ -347,13 +347,18 @@ router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
      LEFT JOIN users c ON a.closer_id = c.id
      ORDER BY a.appt_date DESC, a.appt_hour DESC`
   );
+  // photo_urls stocke en JSON (voir deals.photo_urls / ad_leads.quote_image_urls, meme convention)
+  // — photos de callback televersees depuis la fiche du RDV.
+  rows.forEach(a => {
+    try { a.photo_urls = JSON.parse(a.photo_urls || '[]'); } catch { a.photo_urls = []; }
+  });
   return res.json(rows);
 });
 
 router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
   const {
-    status, apptDate, apptHour, notes,
+    status, apptDate, apptHour, notes, photoUrls,
     clientFirstName, clientLastName, phone, email, address, city, postal,
   } = req.body;
   const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
@@ -366,6 +371,8 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   // Notes du RDV — editables a tout moment, y compris apres la prise du RDV (le setter veut
   // pouvoir corriger/completer ses notes une fois sur le terrain, voir demande utilisateur).
   if (notes !== undefined)    { sets.push('notes = ?');     params.push(notes || null); }
+  // Photos du RDV (callback) — tableau JSON d'URLs Cloudinary, meme convention que deals/ad_leads.
+  if (photoUrls !== undefined) { sets.push('photo_urls = ?'); params.push(JSON.stringify(Array.isArray(photoUrls) ? photoUrls : [])); }
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     params.push(id);
