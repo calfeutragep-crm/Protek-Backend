@@ -336,8 +336,9 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
 router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
   const rows = query(
     `SELECT a.*,
+       l.first_name AS lead_first_name, l.last_name AS lead_last_name,
        l.first_name || ' ' || l.last_name AS name,
-       l.phone, l.address, l.city,
+       l.phone, l.email, l.address, l.city, l.postal,
        s.first_name || ' ' || s.last_name AS setter_name,
        c.first_name || ' ' || c.last_name AS closer_name
      FROM appointments a
@@ -351,7 +352,10 @@ router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
 
 router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
-  const { status, apptDate, apptHour } = req.body;
+  const {
+    status, apptDate, apptHour, notes,
+    clientFirstName, clientLastName, phone, email, address, city, postal,
+  } = req.body;
   const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
   if (!appt) return res.status(404).json({ error: 'Appointment not found.' });
   const sets = [];
@@ -359,10 +363,32 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   if (status !== undefined)   { sets.push('status = ?');    params.push(status); }
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate); }
   if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(parseFloat(apptHour)); }
+  // Notes du RDV — editables a tout moment, y compris apres la prise du RDV (le setter veut
+  // pouvoir corriger/completer ses notes une fois sur le terrain, voir demande utilisateur).
+  if (notes !== undefined)    { sets.push('notes = ?');     params.push(notes || null); }
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     params.push(id);
     run(`UPDATE appointments SET ${sets.join(', ')} WHERE id = ?`, params);
+  }
+  // Infos client (nom, tel, email, adresse) vivent sur la fiche `leads`, pas `appointments` —
+  // meme regle que ci-dessus : editables en tout temps, meme RDV deja pris/ferme, pour corriger
+  // une adresse ou un numero errone sans devoir tout re-creer.
+  if (appt.lead_id) {
+    const leadSets = [];
+    const leadParams = [];
+    if (clientFirstName !== undefined) { leadSets.push('first_name = ?'); leadParams.push(clientFirstName); }
+    if (clientLastName  !== undefined) { leadSets.push('last_name = ?');  leadParams.push(clientLastName); }
+    if (phone   !== undefined) { leadSets.push('phone = ?');   leadParams.push(phone); }
+    if (email   !== undefined) { leadSets.push('email = ?');   leadParams.push(email || null); }
+    if (address !== undefined) { leadSets.push('address = ?'); leadParams.push(address); }
+    if (city    !== undefined) { leadSets.push('city = ?');    leadParams.push(city || null); }
+    if (postal  !== undefined) { leadSets.push('postal = ?');  leadParams.push(postal || null); }
+    if (leadSets.length) {
+      leadSets.push("updated_at = datetime('now')");
+      leadParams.push(appt.lead_id);
+      run(`UPDATE leads SET ${leadSets.join(', ')} WHERE id = ?`, leadParams);
+    }
   }
   if (status === 'Closed Won') {
     if (appt.lead_id) {
