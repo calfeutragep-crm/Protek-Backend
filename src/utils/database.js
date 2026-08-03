@@ -427,6 +427,10 @@ function migrateNewColumns() {
     // bloques retroactivement. insertAdLead() force explicitement 0 sur chaque NOUVEAU lead cree
     // apres ce deploiement, qui devra donc etre qualifie avant de changer de statut.
     { table: 'ad_leads',              column: 'qualification_exempt',          def: 'INTEGER DEFAULT 1' },
+    // Photos de callback/RDV (porte-a-porte) — televersees par le closer directement depuis la
+    // fiche du rendez-vous, meme convention que deals.photo_urls / ad_leads.quote_image_urls
+    // (tableau JSON d'URLs Cloudinary).
+    { table: 'appointments',          column: 'photo_urls',                    def: "TEXT DEFAULT '[]'" },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
