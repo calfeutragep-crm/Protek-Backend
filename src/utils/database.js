@@ -240,6 +240,27 @@ function createSchema() {
       FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id),
       FOREIGN KEY(author_id) REFERENCES users(id)
     );
+    -- Demandes de service apres-vente (garantie/suivi) — formulaire dedie sur
+    -- calfeutrageprotek.com/apres-vente, ingere via POST /webhooks/after-sales (meme cle partagee
+    -- que /webhooks/ad-leads). Table SEPAREE de ad_leads/appointments : ce ne sont pas des
+    -- prospects (aucun setter/closer/statut de vente), seulement une file de demandes visible et
+    -- traitee par l'owner uniquement (voir requireOwner sur GET/PATCH /after-sales).
+    CREATE TABLE IF NOT EXISTS after_sales_requests (
+      id TEXT PRIMARY KEY,
+      first_name TEXT,
+      last_name TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      city TEXT,
+      install_date TEXT,
+      invoice_number TEXT,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'New',
+      admin_notes TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS chat_channels (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
