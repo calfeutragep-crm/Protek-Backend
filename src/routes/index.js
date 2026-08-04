@@ -833,29 +833,91 @@ router.post('/webhooks/after-sales', webhookLimiter, (req, res) => {
   }
 });
 
-// GET/PATCH /after-sales — reserve a l'owner (voir requireOwner). Aucun autre role (setter,
-// closer, manager, tech, lead_marketing, lead_closer, team_leader_vente) n'y a acces, meme en
-// lecture — demande utilisateur explicite "admin seulement".
-router.get('/after-sales', requireAuth, requireOwner, (req, res) => {
+// GET/PATCH/DELETE /after-sales — reserve a l'owner ET au gerant des installations (manager),
+// voir requireManagerOrOwner. Demande utilisateur (2026-08-03) : le gerant doit avoir le meme
+// acces que l'owner sur cette section (il assigne les jobs aux techniciens). Toujours bloque pour
+// setter/closer/tech/lead_marketing/lead_closer/team_leader_vente.
+router.get('/after-sales', requireAuth, requireManagerOrOwner, (req, res) => {
   const rows = query('SELECT * FROM after_sales_requests ORDER BY created_at DESC');
+  rows.forEach(r => { try { r.photo_urls = JSON.parse(r.photo_urls || '[]'); } catch { r.photo_urls = []; } });
   return res.json(rows);
 });
 
-router.patch('/after-sales/:id', requireAuth, requireOwner, (req, res) => {
+router.patch('/after-sales/:id', requireAuth, requireManagerOrOwner, (req, res) => {
   const { id } = req.params;
-  const { status, adminNotes } = req.body;
+  const { status, adminNotes, photoUrls } = req.body;
   const reqRow = get('SELECT * FROM after_sales_requests WHERE id = ?', [id]);
   if (!reqRow) return res.status(404).json({ error: 'Demande introuvable.' });
   const sets = [];
   const params = [];
   if (status !== undefined)     { sets.push('status = ?');       params.push(status); }
   if (adminNotes !== undefined) { sets.push('admin_notes = ?');  params.push(adminNotes || null); }
+  // Photos televersees depuis la fiche (ex: photos du degat/probleme signale) — meme convention
+  // JSON que partout ailleurs (deals/appointments/ad_leads).
+  if (photoUrls !== undefined)  { sets.push('photo_urls = ?');   params.push(JSON.stringify(Array.isArray(photoUrls) ? photoUrls : [])); }
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     params.push(id);
     run(`UPDATE after_sales_requests SET ${sets.join(', ')} WHERE id = ?`, params);
   }
   return res.json({ message: 'After-sales request updated.' });
+});
+
+// Suppression — demande utilisateur explicite. Reserve owner/manager comme le reste de la
+// section. Ne touche pas a un eventuel ticket d'installation deja cree (voir assign ci-dessous) :
+// une fois assigne a un technicien, le job continue d'exister dans installation_tickets meme si
+// la demande apres-vente d'origine est supprimee.
+router.delete('/after-sales/:id', requireAuth, requireManagerOrOwner, (req, res) => {
+  const { id } = req.params;
+  const reqRow = get('SELECT id FROM after_sales_requests WHERE id = ?', [id]);
+  if (!reqRow) return res.status(404).json({ error: 'Demande introuvable.' });
+  run('DELETE FROM after_sales_requests WHERE id = ?', [id]);
+  return res.json({ message: 'After-sales request deleted.' });
+});
+
+// Assigner une demande apres-vente a un technicien — cree (ou met a jour, si deja assignee une
+// premiere fois) un installation_ticket exactement comme un deal Closed Won le ferait, pour que
+// le technicien la voie dans SON PROPRE horaire (GET /tickets scope deja par tech_id) au meme
+// titre qu'une installation normale. Voir demande utilisateur "assigner a un technicien qui iras
+// directement dans son horaire comme une installation normale".
+router.post('/after-sales/:id/assign', requireAuth, requireManagerOrOwner, (req, res) => {
+  const { id } = req.params;
+  const { techId, scheduledDate } = req.body;
+  const asRow = get('SELECT * FROM after_sales_requests WHERE id = ?', [id]);
+  if (!asRow) return res.status(404).json({ error: 'Demande introuvable.' });
+  if (!techId) return res.status(400).json({ error: 'techId requis.' });
+
+  const clientName = `${asRow.first_name || ''} ${asRow.last_name || ''}`.trim() || 'Client';
+  let ticketId = asRow.ticket_id;
+  if (ticketId) {
+    // Deja assignee une premiere fois — on met simplement a jour le technicien/la date plutot
+    // que de creer un second ticket pour la meme demande.
+    run(
+      `UPDATE installation_tickets SET tech_id = ?, scheduled_install_date = ?, status = 'Scheduled', updated_at = datetime('now') WHERE id = ?`,
+      [techId, scheduledDate || null, ticketId]
+    );
+  } else {
+    ticketId = uuid();
+    run(
+      `INSERT INTO installation_tickets (
+         id, after_sales_id, client_name, address, city, phone, email,
+         notes, photo_urls, scheduled_install_date, tech_id, status
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ticketId, asRow.id, clientName, asRow.address || null, asRow.city || null,
+        asRow.phone || null, asRow.email || null, asRow.description || null,
+        asRow.photo_urls || '[]', scheduledDate || null, techId, 'Scheduled',
+      ]
+    );
+    run("UPDATE after_sales_requests SET ticket_id = ?, status = 'In Progress', updated_at = datetime('now') WHERE id = ?", [ticketId, asRow.id]);
+  }
+  const tech = get('SELECT first_name FROM users WHERE id = ?', [techId]);
+  if (tech) {
+    const dateStr = scheduledDate ? ` le ${scheduledDate}` : '';
+    notifyUser(techId, `🛠️ Job après-vente assigné: ${clientName}${dateStr} — ${asRow.address || ''}`,
+      { title: '🛠️ Job après-vente assigné', body: `${clientName}${dateStr}`, url: '/' });
+  }
+  return res.json({ message: 'After-sales request assigned.', ticketId });
 });
 
 
