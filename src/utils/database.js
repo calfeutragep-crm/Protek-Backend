@@ -452,6 +452,16 @@ function migrateNewColumns() {
     // fiche du rendez-vous, meme convention que deals.photo_urls / ad_leads.quote_image_urls
     // (tableau JSON d'URLs Cloudinary).
     { table: 'appointments',          column: 'photo_urls',                    def: "TEXT DEFAULT '[]'" },
+    // Photos + lien vers le ticket d'installation cree lors de l'assignation a un technicien
+    // (voir POST /after-sales/:id/assign) — permet d'afficher "Ticket cree" dans la fiche apres
+    // qu'un gerant/owner ait assigne la demande, et d'eviter de creer deux tickets pour la meme
+    // demande si on la reassigne plus tard.
+    { table: 'after_sales_requests',  column: 'photo_urls',                    def: "TEXT DEFAULT '[]'" },
+    { table: 'after_sales_requests',  column: 'ticket_id',                     def: 'TEXT' },
+    // Lien retour installation_tickets -> after_sales_requests (nullable, symetrique a deal_id/
+    // appointment_id) — utilise pour afficher un badge d'origine "Après-vente" dans la queue du
+    // gerant et le calendrier du technicien (voir getTickets/getTicket, origin CASE).
+    { table: 'installation_tickets',  column: 'after_sales_id',                def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
