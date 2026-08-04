@@ -765,6 +765,100 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════
+// APRES-VENTE — file de demandes admin-only (owner uniquement), separee du pipeline de vente.
+// Ingeree via le formulaire calfeutrageprotek.com/apres-vente -> fonction Supabase notify-lead
+// (isAfterSales:true) -> ce webhook, jamais melangee a ad_leads/appointments. Voir memoire
+// "protek-closer-calendar-features" / "protek-website-lead-pipeline" pour le contexte du pipeline
+// existant qu'on reutilise cote transport (meme cle partagee) sans reutiliser la table.
+// ═══════════════════════════════════════════
+function insertAfterSalesRequest({ firstName, lastName, phone, email, address, city, installDate, invoiceNumber, description }) {
+  const id = uuid();
+  run(
+    `INSERT INTO after_sales_requests (
+       id, first_name, last_name, phone, email, address, city, install_date, invoice_number, description, status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New')`,
+    [id, firstName, lastName || null, phone, email || null, address || null, city || null, installDate || null, invoiceNumber || null, description || null]
+  );
+  // Owner uniquement — jamais les roles de vente (setter/closer/lead_closer/lead_marketing),
+  // c'est une demande de service, pas un prospect.
+  notifyRole('owner', `🛠️ Nouvelle demande apres-vente: ${firstName} ${lastName || ''} — ${phone}`,
+    { title: '🛠️ Nouvelle demande apres-vente', body: `${firstName} ${lastName || ''} — ${phone}`, url: '/' });
+  return id;
+}
+
+// POST /webhooks/after-sales — point d'entree PUBLIC (meme cle partagee LEADS_WEBHOOK_SECRET que
+// /webhooks/ad-leads, deja provisionnee sur Railway ET dans le projet Supabase du site — voir
+// PROTEK_CRM_WEBHOOK_SECRET, meme valeur). Accepte les memes alias de champs que /webhooks/ad-leads
+// par coherence, meme si aujourd'hui seule notify-lead (isAfterSales) l'appelle.
+router.post('/webhooks/after-sales', webhookLimiter, (req, res) => {
+  const configuredSecret = process.env.LEADS_WEBHOOK_SECRET;
+  if (!configuredSecret) {
+    return res.status(503).json({ error: 'Webhook non configure (LEADS_WEBHOOK_SECRET manquant).' });
+  }
+  const providedSecret = req.query.key || req.headers['x-webhook-secret'];
+  if (providedSecret !== configuredSecret) {
+    return res.status(401).json({ error: 'Cle webhook invalide.' });
+  }
+
+  const b = req.body || {};
+  let firstName = b.firstName || b.first_name || '';
+  let lastName  = b.lastName  || b.last_name  || '';
+  if (!firstName && !lastName) {
+    const full = (b.name || b.fullName || b.full_name || '').trim();
+    if (full) {
+      const parts = full.split(/\s+/);
+      firstName = parts.shift() || '';
+      lastName = parts.join(' ') || '';
+    }
+  }
+  const phone = b.phone || b.phone_number || b.phoneNumber || '';
+  const email = b.email || b.email_address || b.emailAddress || null;
+  const address = b.address || null;
+  const city = b.city || b.ville || null;
+  const installDate = b.installDate || b.install_date || null;
+  const invoiceNumber = b.invoiceNumber || b.invoice_number || null;
+  const description = b.description || b.message || b.notes || null;
+
+  if (!firstName || !phone) {
+    return res.status(400).json({ error: 'firstName (ou name) et phone requis.' });
+  }
+
+  try {
+    const id = insertAfterSalesRequest({ firstName, lastName, phone, email, address, city, installDate, invoiceNumber, description });
+    return res.status(201).json({ message: 'After-sales request created.', id });
+  } catch (e) {
+    console.error('webhook after-sales error', e);
+    return res.status(500).json({ error: 'Insertion echouee.' });
+  }
+});
+
+// GET/PATCH /after-sales — reserve a l'owner (voir requireOwner). Aucun autre role (setter,
+// closer, manager, tech, lead_marketing, lead_closer, team_leader_vente) n'y a acces, meme en
+// lecture — demande utilisateur explicite "admin seulement".
+router.get('/after-sales', requireAuth, requireOwner, (req, res) => {
+  const rows = query('SELECT * FROM after_sales_requests ORDER BY created_at DESC');
+  return res.json(rows);
+});
+
+router.patch('/after-sales/:id', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const { status, adminNotes } = req.body;
+  const reqRow = get('SELECT * FROM after_sales_requests WHERE id = ?', [id]);
+  if (!reqRow) return res.status(404).json({ error: 'Demande introuvable.' });
+  const sets = [];
+  const params = [];
+  if (status !== undefined)     { sets.push('status = ?');       params.push(status); }
+  if (adminNotes !== undefined) { sets.push('admin_notes = ?');  params.push(adminNotes || null); }
+  if (sets.length) {
+    sets.push("updated_at = datetime('now')");
+    params.push(id);
+    run(`UPDATE after_sales_requests SET ${sets.join(', ')} WHERE id = ?`, params);
+  }
+  return res.json({ message: 'After-sales request updated.' });
+});
+
+
 // Verrou de qualification : un lead_closer ne peut pas deplacer un lead NON exempt (voir
 // qualification_exempt, migration database.js) vers un autre statut tant que la fiche de
 // qualification n'est pas complete (qualification_completed_at NULL). L'owner peut toujours
