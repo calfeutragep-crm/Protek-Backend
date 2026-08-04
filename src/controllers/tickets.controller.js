@@ -102,7 +102,7 @@ function getTickets(req, res) {
       tech.first_name || ' ' || tech.last_name AS tech_name,
       cl.first_name   || ' ' || cl.last_name   AS closer_name,
       st.first_name   || ' ' || st.last_name   AS setter_name,
-      CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
+      CASE WHEN t.after_sales_id IS NOT NULL THEN 'after_sales' WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
     FROM installation_tickets t
     LEFT JOIN users tech ON t.tech_id   = tech.id
     LEFT JOIN users cl   ON t.closer_id = cl.id
@@ -125,7 +125,7 @@ function getTicket(req, res) {
        tech.first_name || ' ' || tech.last_name AS tech_name,
        cl.first_name   || ' ' || cl.last_name   AS closer_name,
        st.first_name   || ' ' || st.last_name   AS setter_name,
-       CASE WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
+       CASE WHEN t.after_sales_id IS NOT NULL THEN 'after_sales' WHEN d.ad_lead_id IS NOT NULL THEN 'marketing' ELSE 'd2d' END AS origin
      FROM installation_tickets t
      LEFT JOIN users tech ON t.tech_id   = tech.id
      LEFT JOIN users cl   ON t.closer_id = cl.id
