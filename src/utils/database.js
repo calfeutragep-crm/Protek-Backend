@@ -184,6 +184,41 @@ function createSchema() {
       FOREIGN KEY(tech_id) REFERENCES users(id),
       FOREIGN KEY(ad_lead_id) REFERENCES ad_leads(id)
     );
+    -- Creneaux bloques par un closer dans son propre horaire (vacances, sport, indisponibilite) —
+    -- voir demande utilisateur "mettre des endpoints dans l'horaire ou tu peux pas mettre de rdv".
+    -- all_day=1 bloque toute la journee (start_hour/end_hour ignores) ; sinon la plage
+    -- [start_hour, end_hour) est bloquee, memes unites demi-heure que appointments.appt_hour
+    -- (voir LEAD_APPT_HOURS cote frontend). Bloque la prise de RDV pour TOUT LE MONDE (closer
+    -- lui-meme ET les setters qui bookent dans son calendrier), pas seulement son propre bouton +.
+    CREATE TABLE IF NOT EXISTS closer_blackouts (
+      id TEXT PRIMARY KEY,
+      closer_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      all_day INTEGER DEFAULT 1,
+      start_hour REAL,
+      end_hour REAL,
+      reason TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(closer_id) REFERENCES users(id)
+    );
+    -- Commissions setter/closer sur les deals FERMES (porte-a-porte uniquement — voir demande
+    -- utilisateur "la commission est seulement pour les deals closes, ca n'a rien a voir avec les
+    -- rendez-vous"). Une ligne par beneficiaire (role 'setter' ou 'closer') par deal, calculee et
+    -- inseree/mise a jour par syncCommissionsForDeal() a la creation du deal et a chaque
+    -- modification de price/cost/self_lead — voir POST/PATCH /deals. status: 'pending' (a verser,
+    -- valeur par defaut) ou 'paid' (verse), change uniquement par l'owner (PATCH /commissions/:id).
+    CREATE TABLE IF NOT EXISTS commissions (
+      id TEXT PRIMARY KEY,
+      deal_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      amount REAL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(deal_id) REFERENCES deals(id),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
     CREATE TABLE IF NOT EXISTS ad_leads (
       id TEXT PRIMARY KEY,
       source TEXT,
@@ -462,6 +497,14 @@ function migrateNewColumns() {
     // appointment_id) — utilise pour afficher un badge d'origine "Après-vente" dans la queue du
     // gerant et le calendrier du technicien (voir getTickets/getTicket, origin CASE).
     { table: 'installation_tickets',  column: 'after_sales_id',                def: 'TEXT' },
+    // "Lead moi" — le closer coche cette case quand il ferme un deal sur SON PROPRE lead (RDV
+    // qu'il a lui-meme pose, pas de setter implique). Voir demande utilisateur : dans ce cas la
+    // commission setter de 300$ ne s'applique pas et le closer touche cette part en plus (voir
+    // syncCommissionsForDeal() dans routes/index.js). Colonne cost ci-dessous : ce que le
+    // job coute a Protek (materiel/installation), rempli par l'owner sur la fiche du deal —
+    // sert au calcul de la commission closer (prix - cost - part setter).
+    { table: 'deals',                 column: 'self_lead',                     def: 'INTEGER DEFAULT 0' },
+    { table: 'deals',                 column: 'cost',                          def: 'REAL DEFAULT 0' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
