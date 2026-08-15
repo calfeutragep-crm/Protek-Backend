@@ -113,6 +113,46 @@ function requireChatAccess(req, res, next) {
   next();
 }
 
+// ── Commissions (deals porte-a-porte fermes uniquement — voir demande utilisateur "la commission
+// est seulement pour les deals closes, ca n'a rien a voir avec les rendez-vous") ──
+// Regle: setter = 300$ fixe par deal ; closer = prix du deal - cost - 300$ setter, SAUF si
+// self_lead (le closer a ferme sur SON PROPRE lead, aucun setter implique) auquel cas la part
+// setter de 300$ ne s'applique pas et le closer la touche en plus. Recalculee a chaque creation
+// de deal et a chaque PATCH qui touche price/cost/self_lead (voir POST/PATCH /deals ci-dessous).
+// Une commission deja marquee 'paid' n'est JAMAIS recalculee automatiquement (montant historique
+// fige) — seules les lignes encore 'pending' sont mises a jour.
+const SETTER_COMMISSION = 300;
+function upsertCommission(dealId, userId, role, amount) {
+  if (!userId) return;
+  const existing = get('SELECT id, status FROM commissions WHERE deal_id = ? AND role = ?', [dealId, role]);
+  if (!existing) {
+    run(
+      `INSERT INTO commissions (id, deal_id, user_id, role, amount, status) VALUES (?, ?, ?, ?, ?, 'pending')`,
+      [uuid(), dealId, userId, role, amount]
+    );
+  } else if (existing.status === 'pending') {
+    run(`UPDATE commissions SET user_id = ?, amount = ?, updated_at = datetime('now') WHERE id = ?`,
+      [userId, amount, existing.id]);
+  }
+  // status 'paid' : on ne touche plus au montant, il reste tel quel meme si price/cost changent apres coup.
+}
+function syncCommissionsForDeal(dealId) {
+  const deal = get('SELECT * FROM deals WHERE id = ?', [dealId]);
+  if (!deal) return;
+  // Uniquement le pipeline porte-a-porte (ad_lead_id NULL) — les deals issus du Leads CRM
+  // marketing n'ont pas de setter/closer au meme sens et ne sont pas concernes par ces commissions.
+  if (deal.ad_lead_id) return;
+  const price = parseFloat(deal.price) || 0;
+  const cost = parseFloat(deal.cost) || 0;
+  const selfLead = !!deal.self_lead;
+  const hasSetter = !!deal.setter_id && !selfLead;
+  if (hasSetter) upsertCommission(dealId, deal.setter_id, 'setter', SETTER_COMMISSION);
+  if (deal.closer_id) {
+    const closerAmount = price - cost - (hasSetter ? SETTER_COMMISSION : 0);
+    upsertCommission(dealId, deal.closer_id, 'closer', closerAmount);
+  }
+}
+
 // ── Leaderboard hebdomadaire (setters: RDV pris, closers: deals fermes) ──
 // Semaine du lundi 00h00 au dimanche 23h59:59, heure de l'Est (America/Toronto — gere EST/EDT
 // automatiquement). Le classement est calcule A LA VOLEE depuis les tables appointments/deals
@@ -311,6 +351,11 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
   notifyRole('owner', `🆕 ${LABEL_D2D} Nouveau lead: ${firstName} ${lastName} — ${phone}`,
     { title: `🆕 Nouveau lead ${LABEL_D2D}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
   if (apptDate) {
+    // Le closer a peut-etre bloque ce creneau (vacances, sport...) — voir isSlotBlocked() et
+    // POST /closer-blackouts. Bloque pour tout le monde, pas seulement son propre bouton +.
+    if (closerId && isSlotBlocked(closerId, apptDate, parseFloat(apptHour) || 14)) {
+      return res.status(409).json({ error: 'Ce closer a bloqué ce créneau — RDV impossible à cette date/heure.' });
+    }
     const apptId = uuid();
     run(
       `INSERT INTO appointments (id, lead_id, setter_id, closer_id, appt_date, appt_hour, status, notes)
@@ -363,6 +408,16 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   } = req.body;
   const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
   if (!appt) return res.status(404).json({ error: 'Appointment not found.' });
+  // Reprogrammation (nouvelle date/heure) — meme verification de blocage que POST /leads. On ne
+  // bloque que si la date OU l'heure change reellement (permet par ex. de juste changer le statut
+  // d'un RDV deja pris sur un jour depuis bloque apres coup, sans se retrouver coince).
+  if ((apptDate !== undefined && apptDate !== appt.appt_date) || (apptHour !== undefined && parseFloat(apptHour) !== appt.appt_hour)) {
+    const checkDate = apptDate !== undefined ? apptDate : appt.appt_date;
+    const checkHour = apptHour !== undefined ? parseFloat(apptHour) : appt.appt_hour;
+    if (appt.closer_id && isSlotBlocked(appt.closer_id, checkDate, checkHour)) {
+      return res.status(409).json({ error: 'Ce closer a bloqué ce créneau — RDV impossible à cette date/heure.' });
+    }
+  }
   const sets = [];
   const params = [];
   if (status !== undefined)   { sets.push('status = ?');    params.push(status); }
@@ -449,13 +504,16 @@ router.post('/deals', requireAuth, (req, res) => {
     notes, photoUrls,
     closerIdOverride, setterIdOverride,
     obstaclesToRemove, toolsNeeded, toolsNotes,
-    adLeadId,
+    adLeadId, selfLead,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
   const dealId = uuid();
   const closerId = closerIdOverride || (['closer', 'lead_closer', 'team_leader_vente'].includes(req.user.role) ? req.user.id : null);
-  let setterId = setterIdOverride || null;
-  if (!setterId && appointmentId) {
+  // "Lead moi" — le closer ferme sur son propre lead, jamais de setter associe meme si un
+  // setterIdOverride ou un appointment.setter_id existait (voir syncCommissionsForDeal).
+  const isSelfLead = !!selfLead;
+  let setterId = isSelfLead ? null : (setterIdOverride || null);
+  if (!isSelfLead && !setterId && appointmentId) {
     const appt = get('SELECT setter_id FROM appointments WHERE id = ?', [appointmentId]);
     if (appt) setterId = appt.setter_id;
   }
@@ -469,8 +527,8 @@ router.post('/deals', requireAuth, (req, res) => {
        ladder_height, install_date,
        work_front, work_right, work_left, work_rear,
        notes, photo_urls, status,
-       obstacles_to_remove, tools_needed, tools_notes, ad_lead_id
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       obstacles_to_remove, tools_needed, tools_notes, ad_lead_id, self_lead
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dealId, appointmentId || null, closerId, setterId,
       clientName, address || null, city || null, postal || null, phone || null, email || null,
@@ -481,11 +539,12 @@ router.post('/deals', requireAuth, (req, res) => {
       workFront || null, workRight || null, workLeft || null, workRear || null,
       notes || null, photoUrlsJson, 'Pending Installation',
       obstaclesToRemove || null, toolsNeeded || null, toolsNotes || null,
-      adLeadId || null,
+      adLeadId || null, isSelfLead ? 1 : 0,
     ]
   );
   const newDeal = get('SELECT * FROM deals WHERE id = ?', [dealId]);
   if (newDeal) createTicketFromDeal(newDeal);
+  syncCommissionsForDeal(dealId);
   if (adLeadId) {
     run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [adLeadId]);
     // Repousse vers GoHighLevel : marque l'opportunite correspondante "won". Fire-and-forget
@@ -527,19 +586,29 @@ router.post('/deals', requireAuth, (req, res) => {
 
 router.patch('/deals/:id', requireAuth, (req, res) => {
   const { id } = req.params;
-  const { status, techId, installDate, photoUrls } = req.body;
+  const { status, techId, installDate, photoUrls, price, cost, selfLead } = req.body;
   const deal = get('SELECT * FROM deals WHERE id = ?', [id]);
   if (!deal) return res.status(404).json({ error: 'Deal not found.' });
+  // price/cost/selfLead : reserves a l'owner (calcul des commissions, voir requireOwner ci-dessous
+  // sur PATCH /commissions et syncCommissionsForDeal) — un closer ne doit pas pouvoir gonfler sa
+  // propre commission en modifiant son prix ou son cout apres coup.
+  const canEditMoney = req.user.role === 'owner';
   const sets = [];
   const params = [];
   if (status !== undefined)      { sets.push('status = ?');       params.push(status); }
   if (techId !== undefined)      { sets.push('tech_id = ?');      params.push(techId || null); }
   if (installDate !== undefined) { sets.push('install_date = ?'); params.push(installDate || null); }
   if (photoUrls !== undefined)   { sets.push('photo_urls = ?');   params.push(JSON.stringify(photoUrls)); }
+  if (canEditMoney && price !== undefined)    { sets.push('price = ?');     params.push(parseFloat(price) || 0); }
+  if (canEditMoney && cost !== undefined)     { sets.push('cost = ?');      params.push(parseFloat(cost) || 0); }
+  if (canEditMoney && selfLead !== undefined) { sets.push('self_lead = ?'); params.push(selfLead ? 1 : 0); }
   if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
   sets.push("updated_at = datetime('now')");
   params.push(id);
   run(`UPDATE deals SET ${sets.join(', ')} WHERE id = ?`, params);
+  if (canEditMoney && (price !== undefined || cost !== undefined || selfLead !== undefined)) {
+    syncCommissionsForDeal(id);
+  }
   const updatedDeal = get('SELECT * FROM deals WHERE id = ?', [id]);
   if (updatedDeal) syncTicketFromDeal(updatedDeal);
   const ticket = get('SELECT id FROM installation_tickets WHERE deal_id = ?', [id]);
@@ -557,6 +626,98 @@ router.patch('/deals/:id', requireAuth, (req, res) => {
   }
   return res.json({ message: 'Deal updated.' });
 });
+
+// ── Commissions — voir syncCommissionsForDeal() plus haut pour le calcul. Setter/closer voient
+// uniquement les leurs (/commissions/mine) ; l'owner voit tout et peut basculer le statut
+// pending <-> paid ("a verser" / "verse", voir demande utilisateur).
+router.get('/commissions/mine', requireAuth, requireD2DOnly, (req, res) => {
+  const rows = query(
+    `SELECT c.*, d.client_name, d.price, d.install_date, d.status AS deal_status
+     FROM commissions c
+     JOIN deals d ON c.deal_id = d.id
+     WHERE c.user_id = ?
+     ORDER BY c.created_at DESC`,
+    [req.user.id]
+  );
+  return res.json(rows);
+});
+
+router.get('/commissions', requireAuth, requireOwner, (req, res) => {
+  const rows = query(
+    `SELECT c.*, d.client_name, d.price, d.install_date, d.status AS deal_status,
+       u.first_name || ' ' || u.last_name AS user_name
+     FROM commissions c
+     JOIN deals d ON c.deal_id = d.id
+     LEFT JOIN users u ON c.user_id = u.id
+     ORDER BY c.created_at DESC`
+  );
+  return res.json(rows);
+});
+
+router.patch('/commissions/:id', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!['pending', 'paid'].includes(status)) {
+    return res.status(400).json({ error: "status must be 'pending' or 'paid'." });
+  }
+  const commission = get('SELECT id FROM commissions WHERE id = ?', [id]);
+  if (!commission) return res.status(404).json({ error: 'Commission not found.' });
+  run(`UPDATE commissions SET status = ?, updated_at = datetime('now') WHERE id = ?`, [status, id]);
+  return res.json({ message: 'Commission updated.' });
+});
+
+// ── Blocages d'horaire closer (vacances, sport, indisponibilite) — voir demande utilisateur
+// "mettre des endpoints dans l'horaire ou tu peux pas mettre de rdv". Le closer gere les siens ;
+// l'owner peut en gerer pour n'importe quel closer (utile s'il bloque une journee ferie pour
+// toute l'equipe, par exemple). Bloque la prise de RDV pour tout le monde — voir la verification
+// dans POST /leads et PATCH /appointments/:id plus bas (isSlotBlocked()).
+router.get('/closer-blackouts', requireAuth, requireD2DOnly, (req, res) => {
+  return res.json(query('SELECT * FROM closer_blackouts ORDER BY date ASC'));
+});
+
+router.post('/closer-blackouts', requireAuth, requireD2DOnly, (req, res) => {
+  const { closerId, date, allDay, startHour, endHour, reason } = req.body;
+  const r = req.user.role;
+  if (r !== 'closer' && r !== 'team_leader_vente' && r !== 'owner') {
+    return res.status(403).json({ error: 'Closer or owner access required.' });
+  }
+  const targetCloserId = (r === 'owner' && closerId) ? closerId : req.user.id;
+  if (!date) return res.status(400).json({ error: 'date required.' });
+  const isAllDay = allDay === undefined ? true : !!allDay;
+  const id = uuid();
+  run(
+    `INSERT INTO closer_blackouts (id, closer_id, date, all_day, start_hour, end_hour, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, targetCloserId, date, isAllDay ? 1 : 0,
+     isAllDay ? null : (parseFloat(startHour) || null),
+     isAllDay ? null : (parseFloat(endHour) || null),
+     reason || null]
+  );
+  return res.status(201).json({ message: 'Blackout created.', id });
+});
+
+router.delete('/closer-blackouts/:id', requireAuth, requireD2DOnly, (req, res) => {
+  const { id } = req.params;
+  const b = get('SELECT * FROM closer_blackouts WHERE id = ?', [id]);
+  if (!b) return res.status(404).json({ error: 'Blackout not found.' });
+  if (req.user.role !== 'owner' && b.closer_id !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied.' });
+  }
+  run('DELETE FROM closer_blackouts WHERE id = ?', [id]);
+  return res.json({ message: 'Blackout deleted.' });
+});
+
+// Verifie si un creneau (closerId/date/hour) tombe dans un blocage — utilisee avant de creer ou
+// reprogrammer un rendez-vous (voir POST /leads et PATCH /appointments/:id).
+function isSlotBlocked(closerId, date, hour) {
+  if (!closerId || !date) return false;
+  const blocks = query('SELECT * FROM closer_blackouts WHERE closer_id = ? AND date = ?', [closerId, date]);
+  return blocks.some(b => {
+    if (b.all_day) return true;
+    if (hour == null || b.start_hour == null || b.end_hour == null) return false;
+    return hour >= b.start_hour && hour < b.end_hour;
+  });
+}
 
 router.get  ('/tickets',     requireAuth, requireTicketAccess,   getTickets);
 router.get  ('/tickets/:id', requireAuth, requireTicketAccess,   getTicket);
