@@ -1,8 +1,23 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const multer = require('multer');
+const crypto = require('crypto');
 const { v4: uuid } = require('uuid');
 const cloudinary = require('cloudinary').v2;
+
+// Audit 2026-09-05 : POST /webhooks/ad-leads et /webhooks/after-sales comparaient la cle
+// partagee avec `!==` (comparaison a temps variable — le temps de reponse peut, en theorie,
+// fuiter la cle caractere par caractere a un attaquant qui mesure la latence sur beaucoup de
+// tentatives). crypto.timingSafeEqual() compare en temps constant. Il exige deux buffers de
+// MEME longueur (sinon il leve une exception) — on compare donc d'abord les longueurs, ce qui
+// est sans risque a reveler (la longueur d'une cle secrete n'aide pas a la deviner).
+function secretsMatch(provided, configured) {
+  if (typeof provided !== 'string' || typeof configured !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(configured);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 const { register, login, me, swapCrmRole, forgotPassword, resetPassword } = require('../controllers/auth.controller');
 const {
@@ -19,6 +34,9 @@ const { requireAuth, requireOwner } = require('../middleware/auth');
 const { query, get, run } = require('../utils/database');
 const { sendPushToUser, VAPID_PUBLIC_KEY } = require('../utils/push');
 const { notifyUser, notifyRole } = require('../utils/notify');
+const { sendSms } = require('../utils/sms');
+const { sendEmail } = require('../utils/email');
+const { buildClosedWonMessage } = require('../utils/dealClosedMessage');
 const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
@@ -76,6 +94,25 @@ function requireTicketAccess(req, res, next) {
   }
   next();
 }
+// Audit 2026-09-07 (test end-to-end du workflow complet setter -> technicien) : PATCH
+// /tickets/:id etait restreint a requireManagerOrOwner depuis la toute premiere version du
+// code, alors que le frontend donne au technicien des boutons "Scheduled / In Progress /
+// Completed" qui appellent CE MEME endpoint (voir buildTicketDetailSheet cote frontend) — un
+// technicien recevait donc systematiquement un 403 en tentant de faire progresser son propre
+// job, confirme par un test HTTP reel. On autorise maintenant owner/manager (sur n'importe quel
+// ticket, comme avant) ET tech, mais UNIQUEMENT sur un ticket qui lui est deja assigne — jamais
+// sur le ticket d'un collegue. La restriction des CHAMPS modifiables par un tech (statut
+// seulement, jamais reassignation/date) est faite dans updateTicket() (voir tickets.controller.js).
+function requireTicketUpdateAccess(req, res, next) {
+  const r = req.user.role;
+  if (r === 'owner' || r === 'manager') return next();
+  if (r === 'tech') {
+    const ticket = get('SELECT tech_id FROM installation_tickets WHERE id = ?', [req.params.id]);
+    if (ticket && ticket.tech_id === req.user.id) return next();
+    return res.status(403).json({ error: 'You can only update your own assigned tickets.' });
+  }
+  return res.status(403).json({ error: 'Manager, owner, or assigned technician access required.' });
+}
 // Le "Leads CRM" (Facebook/Instagram/Google Ads) est une section entierement separee du CRM
 // porte-a-porte : seuls owner, lead_marketing et lead_closer y ont acces. Les roles porte-a-porte
 // (setter/closer/manager/tech) sont explicitement bloques par requireD2DOnly ci-dessous, et
@@ -99,6 +136,20 @@ function requireD2DOnly(req, res, next) {
   const r = req.user.role;
   if (r === 'lead_marketing' || r === 'lead_closer') {
     return res.status(403).json({ error: 'This section is not part of the Leads CRM.' });
+  }
+  next();
+}
+// Audit 2026-09-05 : POST/PATCH /deals n'avaient aucune restriction de role au-dela de
+// requireAuth — un tech ou un lead_marketing authentifie pouvait appeler l'API directement
+// (hors UI, qui cache simplement le bouton) pour creer un deal ou modifier le statut/technicien/
+// photos de N'IMPORTE QUEL deal. Cree un deal (porte-a-porte OU issu d'un lead marketing via
+// adLeadId, voir POST /deals) : uniquement closer/team_leader_vente/lead_closer/owner — memes
+// roles que ceux deja consideres comme "createur automatique" (closerId = req.user.id) dans la
+// logique existante de POST /deals.
+function requireDealCreateAccess(req, res, next) {
+  const r = req.user.role;
+  if (!['owner', 'closer', 'team_leader_vente', 'lead_closer'].includes(r)) {
+    return res.status(403).json({ error: 'Deal creation is restricted to closers, team leads, lead closers, and the owner.' });
   }
   next();
 }
@@ -307,7 +358,11 @@ router.get('/assignments', requireAuth, requireD2DOnly, (req, res) => {
   return res.json(map);
 });
 
-router.put('/assignments', requireAuth, requireD2DOnly, (req, res) => {
+// Audit 2026-09-05 : n'avait que requireD2DOnly, donc un setter ou un tech authentifie pouvait
+// reassigner N'IMPORTE QUEL setter a N'IMPORTE QUEL closer via l'API directement (l'UI qui
+// appelle ceci vit exclusivement dans les ecrans de gestion d'equipe de l'owner, voir
+// saveAssignments() cote frontend). Restreint a l'owner, seul role qui gere ces affectations.
+router.put('/assignments', requireAuth, requireOwner, (req, res) => {
   const { setterId, closerId } = req.body;
   if (!setterId) return res.status(400).json({ error: 'setterId required.' });
   run(
@@ -334,6 +389,15 @@ router.post('/leads', requireAuth, requireD2DOnly, (req, res) => {
   const { firstName, lastName, phone, email, address, city, postal, notes, closerId, apptDate, apptHour } = req.body;
   if (!firstName || !lastName || !phone) {
     return res.status(400).json({ error: 'firstName, lastName, phone required.' });
+  }
+  // Audit 2026-09-10 (rapporte par l'utilisateur : la ville n'apparaissait "que sur certains
+  // rendez-vous") — le formulaire "Nouveau Lead" marque deja "Ville *" comme obligatoire cote
+  // frontend (voir openNewLeadSheet), mais rien ne l'imposait cote serveur : un appel direct a
+  // cette API (ou un ancien build du frontend) pouvait creer un lead/RDV sans ville, qui
+  // n'apparaissait alors jamais dans le calendrier du closer ni dans la fiche du RDV. On aligne
+  // maintenant le serveur sur l'exigence deja affichee au setter.
+  if (!city) {
+    return res.status(400).json({ error: 'city required.' });
   }
   const leadId = uuid();
   const setterId = req.user.id;
@@ -494,7 +558,7 @@ router.get('/deals', requireAuth, (req, res) => {
   return res.json(rows);
 });
 
-router.post('/deals', requireAuth, (req, res) => {
+router.post('/deals', requireAuth, requireDealCreateAccess, (req, res) => {
   const {
     appointmentId, clientName, address, city, postal, phone, email,
     price, paymentMethod,
@@ -507,6 +571,13 @@ router.post('/deals', requireAuth, (req, res) => {
     adLeadId, selfLead,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
+  // Audit 2026-09-07 (test end-to-end) : rien n'empechait un prix negatif d'etre envoye ici — un
+  // deal se referme forcement sur une VENTE, jamais un montant negatif (un remboursement/
+  // ajustement est une operation distincte, pas encore definie cote produit — voir cartographie
+  // initiale). On rejette donc simplement un prix negatif a la creation.
+  if (price !== undefined && price !== null && price !== '' && parseFloat(price) < 0) {
+    return res.status(400).json({ error: 'Price cannot be negative.' });
+  }
   const dealId = uuid();
   const closerId = closerIdOverride || (['closer', 'lead_closer', 'team_leader_vente'].includes(req.user.role) ? req.user.id : null);
   // "Lead moi" — le closer ferme sur son propre lead, jamais de setter associe meme si un
@@ -581,14 +652,39 @@ router.post('/deals', requireAuth, (req, res) => {
     notifyRole(['lead_marketing', 'owner'], `💰 ${LABEL_LEADS} Lead fermé: ${clientName} — $${dealPrice}`,
       { title: `💰 Lead fermé ${LABEL_LEADS}`, body: `${clientName} — $${dealPrice}`, url: '/' });
   }
+  // Automatisation SMS + courriel client — declenchee a la creation du deal (le moment ou
+  // la vente est "closed won" dans le CRM, D2D comme lead marketing), voir demande
+  // utilisateur "automatisation sms/courriel quand un deal est closed won". Fire-and-forget
+  // (pas de await) — un souci Twilio/Resend ne doit jamais retarder ou faire echouer la
+  // creation du deal cote closer ; chaque util est deja best-effort de son cote (no-op si
+  // les cles TWILIO_*/RESEND_API_KEY ne sont pas configurees sur Railway).
+  const { subject: closedWonSubject, body: closedWonBody } = buildClosedWonMessage(clientName);
+  if (phone) sendSms({ to: phone, body: closedWonBody });
+  if (email) sendEmail({ to: email, subject: closedWonSubject, text: closedWonBody });
+
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
 
-router.patch('/deals/:id', requireAuth, (req, res) => {
+// Audit 2026-09-05 : n'avait que requireAuth — en pratique, seul l'ecran manager/owner
+// (openDealDetailSheet cote frontend) appelle ce PATCH (changement de statut, assignation d'un
+// technicien) ; rien ne l'empechait cote serveur d'etre appele par n'importe quel role
+// authentifie. Restreint a requireManagerOrOwner, deja utilise pour les routes /tickets
+// equivalentes.
+router.patch('/deals/:id', requireAuth, requireManagerOrOwner, (req, res) => {
   const { id } = req.params;
   const { status, techId, installDate, photoUrls, price, cost, selfLead } = req.body;
   const deal = get('SELECT * FROM deals WHERE id = ?', [id]);
   if (!deal) return res.status(404).json({ error: 'Deal not found.' });
+  // Audit 2026-09-07 (test end-to-end) : meme raisonnement que POST /deals ci-dessus — ni le prix
+  // ni le cout d'installation ne devraient jamais etre negatifs (un cout plus eleve que le prix
+  // reduit deja la commission du closer jusqu'a zero/negatif, voir syncCommissionsForDeal ; ca
+  // reste une decision produit distincte de "un montant negatif saisi par erreur").
+  if (price !== undefined && price !== null && price !== '' && parseFloat(price) < 0) {
+    return res.status(400).json({ error: 'Price cannot be negative.' });
+  }
+  if (cost !== undefined && cost !== null && cost !== '' && parseFloat(cost) < 0) {
+    return res.status(400).json({ error: 'Cost cannot be negative.' });
+  }
   // price/cost/selfLead : reserves a l'owner (calcul des commissions, voir requireOwner ci-dessous
   // sur PATCH /commissions et syncCommissionsForDeal) — un closer ne doit pas pouvoir gonfler sa
   // propre commission en modifiant son prix ou son cout apres coup.
@@ -721,7 +817,7 @@ function isSlotBlocked(closerId, date, hour) {
 
 router.get  ('/tickets',     requireAuth, requireTicketAccess,   getTickets);
 router.get  ('/tickets/:id', requireAuth, requireTicketAccess,   getTicket);
-router.patch('/tickets/:id', requireAuth, requireManagerOrOwner, updateTicket);
+router.patch('/tickets/:id', requireAuth, requireTicketUpdateAccess, updateTicket);
 
 router.get ('/chat/channels', requireAuth, requireChatAccess, getChatChannels);
 router.post('/chat/channels', requireAuth, requireOwner,      createChatChannel);
@@ -847,7 +943,7 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
     return res.status(503).json({ error: 'Webhook non configure (LEADS_WEBHOOK_SECRET manquant).' });
   }
   const providedSecret = req.query.key || req.headers['x-webhook-secret'];
-  if (providedSecret !== configuredSecret) {
+  if (!secretsMatch(providedSecret, configuredSecret)) {
     return res.status(401).json({ error: 'Cle webhook invalide.' });
   }
 
@@ -958,7 +1054,7 @@ router.post('/webhooks/after-sales', webhookLimiter, (req, res) => {
     return res.status(503).json({ error: 'Webhook non configure (LEADS_WEBHOOK_SECRET manquant).' });
   }
   const providedSecret = req.query.key || req.headers['x-webhook-secret'];
-  if (providedSecret !== configuredSecret) {
+  if (!secretsMatch(providedSecret, configuredSecret)) {
     return res.status(401).json({ error: 'Cle webhook invalide.' });
   }
 
