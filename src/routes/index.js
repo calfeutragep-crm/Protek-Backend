@@ -1884,13 +1884,15 @@ function requireReferencementAdmin(req, res, next) {
   next();
 }
 
-function insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes }) {
+function insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes, referrerName, referrerPhone, referrerEmail, repName }) {
   const id = uuid();
   run(
     `INSERT INTO referral_leads (
-       id, first_name, last_name, phone, email, address, city, postal, notes, status
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Nouveau')`,
-    [id, firstName, lastName || null, phone, email || null, address || null, city || null, postal || null, notes || null]
+       id, first_name, last_name, phone, email, address, city, postal, notes,
+       referrer_name, referrer_phone, referrer_email, rep_name, status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Nouveau')`,
+    [id, firstName, lastName || null, phone, email || null, address || null, city || null, postal || null, notes || null,
+     referrerName || null, referrerPhone || null, referrerEmail || null, repName || null]
   );
   notifyRole(['owner', 'team_leader_vente'],
     `🆕 ${LABEL_REF} Nouveau lead: ${firstName} ${lastName || ''} — ${phone}`,
@@ -1932,6 +1934,13 @@ router.post('/webhooks/referencement', webhookLimiter, (req, res) => {
   const city    = b.city || b.ville || null;
   const postal  = b.postal || b.postalCode || b.codePostal || null;
   const notes   = b.notes || b.message || null;
+  // Reponses distinctes du referent (la personne qui refere) — demande utilisateur 2026-09-14 :
+  // affichees separement dans la fiche du lead au CRM plutot que noyees dans notes. Voir
+  // ReferralPage.tsx / notify-lead cote site (repository Lovable).
+  const referrerName  = b.referrerName || b.referrer_name || null;
+  const referrerPhone = b.referrerPhone || b.referrer_phone || null;
+  const referrerEmail = b.referrerEmail || b.referrer_email || null;
+  const repName        = b.repName || b.rep_name || null;
 
   if (!firstName || !phone) {
     return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
@@ -1954,7 +1963,7 @@ router.post('/webhooks/referencement', webhookLimiter, (req, res) => {
   }
 
   try {
-    const id = insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes });
+    const id = insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes, referrerName, referrerPhone, referrerEmail, repName });
     return res.status(201).json({ message: 'Lead crcé.', id });
   } catch (e) {
     console.error('webhook referencement error', e);
