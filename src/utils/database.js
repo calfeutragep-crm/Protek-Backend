@@ -533,6 +533,17 @@ function migrateNewColumns() {
     // sert au calcul de la commission closer (prix - cost - part setter).
     { table: 'deals',                 column: 'self_lead',                     def: 'INTEGER DEFAULT 0' },
     { table: 'deals',                 column: 'cost',                          def: 'REAL DEFAULT 0' },
+    // Reponses distinctes du formulaire /referencement (calfeutrageprotek.com) — demande
+    // utilisateur 2026-09-14 : "il doit y avoir les reponses de chaque question dans le
+    // formulaire dans le lead". Jusqu'ici les coordonnees du referent (la personne qui refere,
+    // distincte du lead — le lead = la personne referee, voir insertReferralLead ci-dessous)
+    // etaient noyees dans un seul champ notes cote site (repository Lovable). Colonnes separees
+    // pour un affichage clair dans la fiche du lead cote CRM (voir GET /referencement/leads et
+    // buildReferencementPage() dans index.html).
+    { table: 'referral_leads',        column: 'referrer_name',                 def: 'TEXT' },
+    { table: 'referral_leads',        column: 'referrer_phone',                def: 'TEXT' },
+    { table: 'referral_leads',        column: 'referrer_email',                def: 'TEXT' },
+    { table: 'referral_leads',        column: 'rep_name',                      def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
