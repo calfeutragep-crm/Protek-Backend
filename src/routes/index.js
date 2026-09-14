@@ -37,7 +37,6 @@ const { notifyUser, notifyRole } = require('../utils/notify');
 const { sendSms } = require('../utils/sms');
 const { sendEmail } = require('../utils/email');
 const { buildClosedWonMessage } = require('../utils/dealClosedMessage');
-const { buildNewLeadMessage } = require('../utils/newLeadMessage');
 const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
@@ -919,20 +918,6 @@ function insertAdLead({
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     { title: `🆕 Nouveau lead ${LABEL_LEADS}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
-  // Automatisation SMS + courriel client — declenchee des qu'un nouveau lead publicitaire entre
-  // (webhook ET creation manuelle passent par insertAdLead), voir demande utilisateur
-  // "automatisation quand un lead rentre, texto automatise et email automatise". Fire-and-forget
-  // (pas de await), meme raisonnement que l'automatisation "deal closed won" plus haut : un souci
-  // Twilio/Resend ne doit jamais retarder ou faire echouer l'insertion du lead ; chaque util est
-  // deja best-effort de son cote (no-op si les cles TWILIO_*/RESEND_API_KEY ne sont pas
-  // configurees sur Railway).
-  const { subject: newLeadSubject, body: newLeadBody } = buildNewLeadMessage(firstName);
-  // Expediteur dedie pour ce message une fois le Hosted SMS de Twilio approuve pour le
-  // numero d'affaires (TWILIO_LEADS_FROM_NUMBER) — tant que cette variable n'est pas
-  // configuree sur Railway, sendSms() retombe automatiquement sur TWILIO_FROM_NUMBER (le
-  // numero utilise par le message de referencement, qui lui ne doit jamais changer).
-  if (phone) sendSms({ to: phone, body: newLeadBody, from: process.env.TWILIO_LEADS_FROM_NUMBER });
-  if (email) sendEmail({ to: email, subject: newLeadSubject, text: newLeadBody });
   return id;
 }
 
@@ -1035,47 +1020,6 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
     console.error('webhook ad-leads error', e);
     return res.status(500).json({ error: 'Insertion echouee.' });
   }
-});
-
-// POST /webhooks/twilio/sms-inbound — recu par Twilio des qu'une personne repond au SMS
-// automatise envoye depuis le numero d'affaires (450-390-8294, meme numero pour le message de
-// nouveau lead et celui de referencement). Transfere immediatement le contenu par SMS au
-// cellulaire personnel de Heisenberg (OWNER_CELL_NUMBER) pour qu'il puisse repondre lui-meme au
-// lead en quelques secondes — voir demande utilisateur 2026-09-14 ("pour que je puisse leur
-// repondre"). Point d'entree PUBLIC (webhook Twilio, aucune session CRM possible) : protege par
-// un secret en query string (?secret=...) integre directement dans l'URL du webhook configuree
-// cote Twilio (jamais dans le payload, que Twilio controle et qu'on ne peut pas signer nous-
-// memes). Repond toujours avec un TwiML vide pour que Twilio n'envoie aucune reponse automatique
-// au lead.
-router.post('/webhooks/twilio/sms-inbound', webhookLimiter, (req, res) => {
-  res.set('Content-Type', 'text/xml');
-  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
-  const providedSecret = req.query.secret;
-  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret)) {
-    return res.status(403).send('<Response></Response>');
-  }
-  const from = req.body.From;
-  const body = req.body.Body || '';
-  const forwardTo = process.env.OWNER_CELL_NUMBER;
-  if (forwardTo && from) {
-    sendSms({ to: forwardTo, body: `Reponse SMS de ${from} :\n${body}` });
-  }
-  return res.status(200).send('<Response></Response>');
-});
-
-// POST /webhooks/twilio/voice-forward — recu par Twilio des qu'un lead appelle le numero
-// d'affaires. Redirige (Dial) l'appel vers le cellulaire personnel de Heisenberg au lieu de
-// simplement sonner dans le vide — meme objectif et meme protection par secret que
-// sms-inbound ci-dessus.
-router.post('/webhooks/twilio/voice-forward', webhookLimiter, (req, res) => {
-  res.set('Content-Type', 'text/xml');
-  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
-  const providedSecret = req.query.secret;
-  const forwardTo = process.env.OWNER_CELL_NUMBER;
-  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret) || !forwardTo) {
-    return res.status(200).send('<Response><Say language="fr-CA">Desole, cet appel ne peut pas etre transfere pour le moment.</Say></Response>');
-  }
-  return res.status(200).send(`<Response><Dial>${forwardTo}</Dial></Response>`);
 });
 
 // ═══════════════════════════════════════════
@@ -1909,6 +1853,225 @@ router.get('/poll', requireAuth, (req, res) => {
     unreadNotifications: unreadCount ? unreadCount.c : 0,
     serverTime: new Date().toISOString(),
   });
+});
+
+
+// ═══════════════════════════════════════════
+// RÉFÉRENCEMENT — leads de recommandation client (calfeutrageprotek.com/referencement).
+// Pipeline dédié, distinct du "Leads CRM" (ad_leads, Facebook/Instagram/Google) et du CRM
+// porte-à-porte classique : accès restreint à owner, team_leader_vente et closer uniquement
+// (voir demande utilisateur — section "referencement" pour admin/team lead ventes/closers). Le
+// closer ne voit QUE ses propres leads assignés (filtré côté SERVEUR ci-dessous, jamais
+// seulement côté UI, même erreur que l'audit 2026-09-05 sur /leads) ; owner/team_leader_vente
+// voient tout et assignent un closer. Une fois assigné, le closer "booke" son RDV — voir POST
+// /referencement/leads/:id/book, qui crée une vraie ligne dans leads+appointments (même
+// mécanisme que POST /leads) pour que ce RDV apparaisse dans son horaire/calendrier existant
+// sans dupliquer cette logique de blackouts/notifications.
+const LABEL_REF = '[Référencement]';
+
+function requireReferencementAccess(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'team_leader_vente' && r !== 'closer') {
+    return res.status(403).json({ error: 'Accès restreint au owner, team leader vente et closers.' });
+  }
+  next();
+}
+function requireReferencementAdmin(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'team_leader_vente') {
+    return res.status(403).json({ error: 'Owner ou team leader vente requis.' });
+  }
+  next();
+}
+
+function insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes }) {
+  const id = uuid();
+  run(
+    `INSERT INTO referral_leads (
+       id, first_name, last_name, phone, email, address, city, postal, notes, status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Nouveau')`,
+    [id, firstName, lastName || null, phone, email || null, address || null, city || null, postal || null, notes || null]
+  );
+  notifyRole(['owner', 'team_leader_vente'],
+    `🆕 ${LABEL_REF} Nouveau lead: ${firstName} ${lastName || ''} — ${phone}`,
+    { title: `🆕 Nouveau lead ${LABEL_REF}`, body: `${firstName} ${lastName || ''} — ${phone}`, url: '/' });
+  return id;
+}
+
+// POST /webhooks/referencement — point d'entrée PUBLIC appelé par le relais serveur de
+// calfeutrageprotek.com/referencement (même clé partagée que /webhooks/ad-leads et
+// /webhooks/after-sales — LEADS_WEBHOOK_SECRET, déjà provisionnée sur Railway ET côté site).
+// Le formulaire public poste vers le backend du site (jamais directement depuis le navigateur du
+// visiteur, la clé ne doit jamais être exposée côté client), qui relaie ici. Si ce relais n'existe
+// pas encore côté site, il doit poster ici avec ?key=LEADS_WEBHOOK_SECRET (ou header
+// x-webhook-secret) — voir POST /webhooks/ad-leads pour un exemple déjà en place.
+router.post('/webhooks/referencement', webhookLimiter, (req, res) => {
+  const configuredSecret = process.env.LEADS_WEBHOOK_SECRET;
+  if (!configuredSecret) {
+    return res.status(503).json({ error: 'Webhook non configuré (LEADS_WEBHOOK_SECRET manquant).' });
+  }
+  const providedSecret = req.query.key || req.headers['x-webhook-secret'];
+  if (!secretsMatch(providedSecret, configuredSecret)) {
+    return res.status(401).json({ error: 'Clé webhook invalide.' });
+  }
+
+  const b = req.body || {};
+  let firstName = b.firstName || b.first_name || '';
+  let lastName  = b.lastName || b.last_name || '';
+  if (!firstName && !lastName) {
+    const full = (b.fullName || b.full_name || b.name || '').trim();
+    if (full) {
+      const parts = full.split(/\s+/);
+      firstName = parts.shift() || '';
+      lastName = parts.join(' ') || '';
+    }
+  }
+  const phone   = b.phone || b.phone_number || b.phoneNumber || '';
+  const email   = b.email || b.email_address || b.emailAddress || null;
+  const address = b.address || b.adresse || null;
+  const city    = b.city || b.ville || null;
+  const postal  = b.postal || b.postalCode || b.codePostal || null;
+  const notes   = b.notes || b.message || null;
+
+  if (!firstName || !phone) {
+    return res.status(400).json({ error: 'firstName (ou fullName) et phone requis.' });
+  }
+
+  // Anti-doublon (même fenêtre de 5 min que /webhooks/ad-leads) — une resoumission accidentelle
+  // du formulaire ne crée pas deux fois le même lead.
+  const normalizedPhone = phone.replace(/\D/g, '');
+  if (normalizedPhone) {
+    const recentDup = get(
+      `SELECT id FROM referral_leads
+       WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'-',''),' ',''),'(',''),')','') = ?
+         AND created_at >= datetime('now', '-5 minutes')
+       ORDER BY created_at DESC LIMIT 1`,
+      [normalizedPhone]
+    );
+    if (recentDup) {
+      return res.status(200).json({ message: 'Lead déjà reçu (doublon évité).', id: recentDup.id });
+    }
+  }
+
+  try {
+    const id = insertReferralLead({ firstName, lastName, phone, email, address, city, postal, notes });
+    return res.status(201).json({ message: 'Lead crcé.', id });
+  } catch (e) {
+    console.error('webhook referencement error', e);
+    return res.status(500).json({ error: 'Insertion échouée.' });
+  }
+});
+
+// GET /referencement/leads — owner/team_leader_vente voient tous les leads ; un closer ne voit
+// QUE ceux qui lui sont assignés (closer_id = req.user.id). Filtrage fait ICI, côté serveur,
+// jamais seulement côté UI — même règle que l'audit 2026-09-05 sur /leads et /assignments.
+router.get('/referencement/leads', requireAuth, requireReferencementAccess, (req, res) => {
+  const r = req.user.role;
+  let rows;
+  if (r === 'closer') {
+    rows = query(
+      `SELECT rl.*, c.first_name || ' ' || c.last_name AS closer_name
+       FROM referral_leads rl
+       LEFT JOIN users c ON rl.closer_id = c.id
+       WHERE rl.closer_id = ?
+       ORDER BY rl.created_at DESC`,
+      [req.user.id]
+    );
+  } else {
+    rows = query(
+      `SELECT rl.*, c.first_name || ' ' || c.last_name AS closer_name
+       FROM referral_leads rl
+       LEFT JOIN users c ON rl.closer_id = c.id
+       ORDER BY rl.created_at DESC`
+    );
+  }
+  return res.json(rows);
+});
+
+// PATCH /referencement/leads/:id/assign — owner/team_leader_vente uniquement : assigne (ou
+// réassigne) le lead à un closer. Notifie le closer assigné.
+router.patch('/referencement/leads/:id/assign', requireAuth, requireReferencementAdmin, (req, res) => {
+  const lead = get('SELECT * FROM referral_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const { closerId } = req.body;
+  if (!closerId) return res.status(400).json({ error: 'closerId requis.' });
+  const closer = get(`SELECT id FROM users WHERE id = ? AND role_id = (SELECT id FROM roles WHERE name = 'closer')`, [closerId]);
+  if (!closer) return res.status(400).json({ error: 'closerId invalide (doit être un closer existant).' });
+  run(
+    `UPDATE referral_leads SET closer_id = ?, status = 'Assigné', updated_at = datetime('now') WHERE id = ?`,
+    [closerId, req.params.id]
+  );
+  notifyUser(closerId, `🆕 ${LABEL_REF} Lead assigné: ${lead.first_name} ${lead.last_name || ''} — ${lead.phone}`,
+    { title: `🆕 Nouveau lead ${LABEL_REF}`, body: `${lead.first_name} ${lead.last_name || ''} — ${lead.phone}`, url: '/' });
+  return res.json({ message: 'Lead assigné.' });
+});
+
+// PATCH /referencement/leads/:id — mise à jour notes/statut de suivi (Ferme/Perdu/etc.) —
+// owner/team_leader_vente, ou le closer assigné à CE lead précisément (jamais un autre closer).
+router.patch('/referencement/leads/:id', requireAuth, requireReferencementAccess, (req, res) => {
+  const lead = get('SELECT * FROM referral_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const r = req.user.role;
+  if (r === 'closer' && lead.closer_id !== req.user.id) {
+    return res.status(403).json({ error: 'Ce lead ne vous est pas assigné.' });
+  }
+  const { status, notes } = req.body;
+  const fields = [];
+  const vals = [];
+  if (status !== undefined) { fields.push('status = ?'); vals.push(status); }
+  if (notes !== undefined)  { fields.push('notes = ?');  vals.push(notes); }
+  if (!fields.length) return res.status(400).json({ error: 'Rien à mettre à jour.' });
+  fields.push(`updated_at = datetime('now')`);
+  vals.push(req.params.id);
+  run(`UPDATE referral_leads SET ${fields.join(', ')} WHERE id = ?`, vals);
+  return res.json({ message: 'Lead mis à jour.' });
+});
+
+// POST /referencement/leads/:id/book — le closer assigné (ou owner/team_leader_vente pour lui)
+// booke le RDV de suivi dans SON PROPRE horaire. Crée une vraie ligne leads + appointments (même
+// mécanisme que POST /leads, y compris le check de blackout) pour que ce RDV apparaisse dans le
+// calendrier existant du closer sans dupliquer cette logique — voir isSlotBlocked().
+router.post('/referencement/leads/:id/book', requireAuth, requireReferencementAccess, (req, res) => {
+  const lead = get('SELECT * FROM referral_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const r = req.user.role;
+  if (r === 'closer' && lead.closer_id !== req.user.id) {
+    return res.status(403).json({ error: 'Ce lead ne vous est pas assigné.' });
+  }
+  if (!lead.closer_id) return res.status(400).json({ error: 'Ce lead doit d\'abord être assigné à un closer.' });
+  const { apptDate, apptHour, address, city, postal } = req.body;
+  if (!apptDate) return res.status(400).json({ error: 'apptDate requis.' });
+  const finalCity = city || lead.city;
+  if (!finalCity) return res.status(400).json({ error: 'city requis.' });
+  const hour = parseFloat(apptHour);
+  const finalHour = isNaN(hour) ? 14 : hour;
+
+  if (isSlotBlocked(lead.closer_id, apptDate, finalHour)) {
+    return res.status(409).json({ error: 'Ce closer a bloqué ce créneau — RDV impossible à cette date/heure.' });
+  }
+
+  const leadId = uuid();
+  run(
+    `INSERT INTO leads (id, first_name, last_name, phone, email, address, city, postal, notes, setter_id, closer_id, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')`,
+    [leadId, lead.first_name, lead.last_name || '', lead.phone, lead.email, address || lead.address, finalCity, postal || lead.postal,
+     `${LABEL_REF} ${lead.notes || ''}`.trim(), null, lead.closer_id]
+  );
+  const apptId = uuid();
+  run(
+    `INSERT INTO appointments (id, lead_id, setter_id, closer_id, appt_date, appt_hour, status, notes)
+     VALUES (?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
+    [apptId, leadId, null, lead.closer_id, apptDate, finalHour, `${LABEL_REF} suivi référencement`]
+  );
+  run(
+    `UPDATE referral_leads SET status = 'Booké', lead_id = ?, appointment_id = ?, updated_at = datetime('now') WHERE id = ?`,
+    [leadId, apptId, req.params.id]
+  );
+  notifyRole(['owner', 'team_leader_vente'],
+    `📅 ${LABEL_REF} RDV booké: ${lead.first_name} ${lead.last_name || ''} le ${apptDate}`,
+    { title: `📅 RDV booké ${LABEL_REF}`, body: `${lead.first_name} ${lead.last_name || ''} — ${apptDate}`, url: '/' });
+
+  return res.status(201).json({ message: 'Rendez-vous booké.', leadId, appointmentId: apptId });
 });
 
 module.exports = router;
