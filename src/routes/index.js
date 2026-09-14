@@ -1037,6 +1037,47 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
   }
 });
 
+// POST /webhooks/twilio/sms-inbound — recu par Twilio des qu'une personne repond au SMS
+// automatise envoye depuis le numero d'affaires (450-390-8294, meme numero pour le message de
+// nouveau lead et celui de referencement). Transfere immediatement le contenu par SMS au
+// cellulaire personnel de Heisenberg (OWNER_CELL_NUMBER) pour qu'il puisse repondre lui-meme au
+// lead en quelques secondes — voir demande utilisateur 2026-09-14 ("pour que je puisse leur
+// repondre"). Point d'entree PUBLIC (webhook Twilio, aucune session CRM possible) : protege par
+// un secret en query string (?secret=...) integre directement dans l'URL du webhook configuree
+// cote Twilio (jamais dans le payload, que Twilio controle et qu'on ne peut pas signer nous-
+// memes). Repond toujours avec un TwiML vide pour que Twilio n'envoie aucune reponse automatique
+// au lead.
+router.post('/webhooks/twilio/sms-inbound', webhookLimiter, (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
+  const providedSecret = req.query.secret;
+  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret)) {
+    return res.status(403).send('<Response></Response>');
+  }
+  const from = req.body.From;
+  const body = req.body.Body || '';
+  const forwardTo = process.env.OWNER_CELL_NUMBER;
+  if (forwardTo && from) {
+    sendSms({ to: forwardTo, body: `Reponse SMS de ${from} :\n${body}` });
+  }
+  return res.status(200).send('<Response></Response>');
+});
+
+// POST /webhooks/twilio/voice-forward — recu par Twilio des qu'un lead appelle le numero
+// d'affaires. Redirige (Dial) l'appel vers le cellulaire personnel de Heisenberg au lieu de
+// simplement sonner dans le vide — meme objectif et meme protection par secret que
+// sms-inbound ci-dessus.
+router.post('/webhooks/twilio/voice-forward', webhookLimiter, (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
+  const providedSecret = req.query.secret;
+  const forwardTo = process.env.OWNER_CELL_NUMBER;
+  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret) || !forwardTo) {
+    return res.status(200).send('<Response><Say language="fr-CA">Desole, cet appel ne peut pas etre transfere pour le moment.</Say></Response>');
+  }
+  return res.status(200).send(`<Response><Dial>${forwardTo}</Dial></Response>`);
+});
+
 // ═══════════════════════════════════════════
 // APRES-VENTE — file de demandes admin-only (owner uniquement), separee du pipeline de vente.
 // Ingeree via le formulaire calfeutrageprotek.com/apres-vente -> fonction Supabase notify-lead
