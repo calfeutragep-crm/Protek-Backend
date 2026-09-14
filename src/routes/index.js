@@ -927,7 +927,11 @@ function insertAdLead({
   // deja best-effort de son cote (no-op si les cles TWILIO_*/RESEND_API_KEY ne sont pas
   // configurees sur Railway).
   const { subject: newLeadSubject, body: newLeadBody } = buildNewLeadMessage(firstName);
-  if (phone) sendSms({ to: phone, body: newLeadBody });
+  // Expediteur dedie pour ce message une fois le Hosted SMS de Twilio approuve pour le
+  // numero d'affaires (TWILIO_LEADS_FROM_NUMBER) — tant que cette variable n'est pas
+  // configuree sur Railway, sendSms() retombe automatiquement sur TWILIO_FROM_NUMBER (le
+  // numero utilise par le message de referencement, qui lui ne doit jamais changer).
+  if (phone) sendSms({ to: phone, body: newLeadBody, from: process.env.TWILIO_LEADS_FROM_NUMBER });
   if (email) sendEmail({ to: email, subject: newLeadSubject, text: newLeadBody });
   return id;
 }
