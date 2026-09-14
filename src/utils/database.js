@@ -387,6 +387,34 @@ function createSchema() {
       FOREIGN KEY(setter_id) REFERENCES users(id),
       FOREIGN KEY(tech_id) REFERENCES users(id)
     );
+    -- Referencement (calfeutrageprotek.com/referencement) : leads de recommandation client,
+    -- pipeline separe et plus simple que ad_leads (pas de qualification GHL) — voir POST
+    -- /webhooks/referencement (public, meme cle partagee que /webhooks/ad-leads) et les routes
+    -- /referencement/leads/* dans routes/index.js. Statuts : Nouveau -> Assigne -> Booked ->
+    -- Ferme/Perdu. lead_id/appointment_id sont rempli au moment ou le closer assigne booke le
+    -- rendez-vous (voir POST /referencement/leads/:id/book) : on cree alors une vraie ligne dans
+    -- leads + appointments (meme mecanisme que POST /leads) pour que le RDV apparaisse dans
+    -- l'horaire du closer sans dupliquer la logique de calendrier/blackouts existante.
+    CREATE TABLE IF NOT EXISTS referral_leads (
+      id TEXT PRIMARY KEY,
+      first_name TEXT,
+      last_name TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      city TEXT,
+      postal TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'Nouveau',
+      closer_id TEXT,
+      lead_id TEXT,
+      appointment_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(closer_id) REFERENCES users(id),
+      FOREIGN KEY(lead_id) REFERENCES leads(id),
+      FOREIGN KEY(appointment_id) REFERENCES appointments(id)
+    );
   `);
   saveDb();
 }
