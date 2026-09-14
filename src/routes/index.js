@@ -37,6 +37,7 @@ const { notifyUser, notifyRole } = require('../utils/notify');
 const { sendSms } = require('../utils/sms');
 const { sendEmail } = require('../utils/email');
 const { buildClosedWonMessage } = require('../utils/dealClosedMessage');
+const { buildNewLeadMessage } = require('../utils/newLeadMessage');
 const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
@@ -918,6 +919,16 @@ function insertAdLead({
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     { title: `🆕 Nouveau lead ${LABEL_LEADS}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
+  // Automatisation SMS + courriel client — declenchee des qu'un nouveau lead publicitaire entre
+  // (webhook ET creation manuelle passent par insertAdLead), voir demande utilisateur
+  // "automatisation quand un lead rentre, texto automatise et email automatise". Fire-and-forget
+  // (pas de await), meme raisonnement que l'automatisation "deal closed won" plus haut : un souci
+  // Twilio/Resend ne doit jamais retarder ou faire echouer l'insertion du lead ; chaque util est
+  // deja best-effort de son cote (no-op si les cles TWILIO_*/RESEND_API_KEY ne sont pas
+  // configurees sur Railway).
+  const { subject: newLeadSubject, body: newLeadBody } = buildNewLeadMessage(firstName);
+  if (phone) sendSms({ to: phone, body: newLeadBody });
+  if (email) sendEmail({ to: email, subject: newLeadSubject, text: newLeadBody });
   return id;
 }
 
