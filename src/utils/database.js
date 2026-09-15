@@ -544,6 +544,14 @@ function migrateNewColumns() {
     { table: 'referral_leads',        column: 'referrer_phone',                def: 'TEXT' },
     { table: 'referral_leads',        column: 'referrer_email',                def: 'TEXT' },
     { table: 'referral_leads',        column: 'rep_name',                      def: 'TEXT' },
+    // Lien vers un VRAI rendez-vous porte-a-porte (leads + appointments) une fois le lead
+    // marketing booke dans l'horaire reel d'un closer/team_leader_vente — meme mecanisme et
+    // meme convention que referral_leads.lead_id/appointment_id (voir POST
+    // /referencement/leads/:id/book). Permet a PATCH /appointments/:id de retrouver ce ad_lead
+    // (via appointment_id) et de resynchroniser automatiquement son statut quand le closer ferme
+    // le rendez-vous (Closed Won/Closed Lost) — demande utilisateur 2026-09-15 "Queue admin-only".
+    { table: 'ad_leads',              column: 'lead_id',                       def: 'TEXT' },
+    { table: 'ad_leads',              column: 'appointment_id',                def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
