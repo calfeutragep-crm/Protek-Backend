@@ -37,6 +37,7 @@ const { notifyUser, notifyRole } = require('../utils/notify');
 const { sendSms } = require('../utils/sms');
 const { sendEmail } = require('../utils/email');
 const { buildClosedWonMessage } = require('../utils/dealClosedMessage');
+const { buildNewLeadSms } = require('../utils/newLeadSms');
 const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
@@ -918,7 +919,11 @@ function insertAdLead({
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     { title: `🆕 Nouveau lead ${LABEL_LEADS}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
-  return id;
+  // SMS automatise au client des la reception d'un nouveau lead (toutes sources), demande
+      // utilisateur 2026-09-15 — voir utils/newLeadSms.js. Fire-and-forget comme le message
+      // closed-won : un souci Twilio ne doit jamais faire echouer la creation du lead.
+      if (phone) sendSms({ to: phone, body: buildNewLeadSms() });
+      return id;
 }
 
 router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
