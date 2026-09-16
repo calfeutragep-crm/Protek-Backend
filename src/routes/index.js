@@ -2206,4 +2206,16 @@ router.post('/referencement/leads/:id/book', requireAuth, requireReferencementAc
   return res.status(201).json({ message: 'Rendez-vous booké.', leadId, appointmentId: apptId });
 });
 
+// DELETE /referencement/leads/:id (admin proprietaire, distinct de requireReferencementAdmin qui autorise aussi team_leader_vente pour assigner/gerer)
+// Si le lead avait deja ete booke (lead_id/appointment_id remplis via /book ci-dessus),
+// on supprime aussi la vraie ligne leads+appointments pour ne pas laisser de RDV fantome au closer.
+router.delete('/referencement/leads/:id', requireAuth, requireOwner, (req, res) => {
+  const lead = get('SELECT * FROM referral_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  if (lead.appointment_id) run('DELETE FROM appointments WHERE id = ?', [lead.appointment_id]);
+  if (lead.lead_id) run('DELETE FROM leads WHERE id = ?', [lead.lead_id]);
+  run('DELETE FROM referral_leads WHERE id = ?', [req.params.id]);
+  return res.json({ message: 'Lead référencement supprimé.' });
+});
+
 module.exports = router;
