@@ -552,6 +552,13 @@ function migrateNewColumns() {
     // le rendez-vous (Closed Won/Closed Lost) — demande utilisateur 2026-09-15 "Queue admin-only".
     { table: 'ad_leads',              column: 'lead_id',                       def: 'TEXT' },
     { table: 'ad_leads',              column: 'appointment_id',                def: 'TEXT' },
+  // Champs requis pour les changements de statut (annulation, callback, report, perdu)
+  { table: 'appointments', column: 'cancellation_reason', def: 'TEXT' },
+  { table: 'appointments', column: 'objection', def: 'TEXT' },
+  { table: 'appointments', column: 'callback_notes', def: 'TEXT' },
+  { table: 'appointments', column: 'reschedule_reason', def: 'TEXT' },
+  { table: 'appointments', column: 'closed_lost_reason', def: 'TEXT' },
+  { table: 'ad_leads', column: 'closed_lost_reason', def: 'TEXT' },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {
