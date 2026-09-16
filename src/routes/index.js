@@ -485,11 +485,42 @@ router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
   return res.json(rows);
 });
 
+// Verrou de statut RDV (porte-a-porte) — demande utilisateur : "quand closers ou setters
+// changent status a cancelled, ils doivent remplir une raison... callback -> photo de la
+// soumission + objection principale + notes de rappel... reschedule -> raison... closed lost ->
+// raison + photo de la soumission". Meme esprit que isQualificationBlocking plus haut : seul
+// closer/setter est bloque, owner/team_leader_vente peut toujours forcer le changement (override
+// admin, coherent avec le reste de l'app).
+function isApptStatusLockBlocking(actorRole, targetStatus) {
+  return (actorRole === 'closer' || actorRole === 'setter')
+    && APPT_STATUS_LOCK_MESSAGES[targetStatus] !== undefined;
+}
+const APPT_STATUS_LOCK_MESSAGES = {
+  'Cancelled':   "Veuillez indiquer la raison de l'annulation avant de changer le statut.",
+  'Callback':    "Veuillez ajouter une photo de la soumission, l'objection principale et des notes de rappel avant de changer le statut.",
+  'Rescheduled': 'Veuillez indiquer la raison du report avant de changer le statut.',
+  'Closed Lost': 'Veuillez indiquer la raison de la perte et ajouter une photo de la soumission avant de changer le statut.',
+};
+function apptStatusLockSatisfied(appt, status, body) {
+  function eff(bodyField, col) { return body[bodyField] !== undefined ? body[bodyField] : appt[col]; }
+  function filled(v) { return v != null && String(v).trim().length > 0; }
+  const effPhotoUrls = body.photoUrls !== undefined ? body.photoUrls : JSON.parse(appt.photo_urls || '[]');
+  const hasPhoto = Array.isArray(effPhotoUrls) && effPhotoUrls.length > 0;
+  switch (status) {
+    case 'Cancelled':   return filled(eff('cancellationReason', 'cancellation_reason'));
+    case 'Rescheduled':  return filled(eff('rescheduleReason', 'reschedule_reason'));
+    case 'Callback':    return hasPhoto && filled(eff('objection', 'objection')) && filled(eff('callbackNotes', 'callback_notes'));
+    case 'Closed Lost': return hasPhoto && filled(eff('closedLostReason', 'closed_lost_reason'));
+    default: return true;
+  }
+}
+
 router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
   const {
     status, apptDate, apptHour, notes, photoUrls,
     clientFirstName, clientLastName, phone, email, address, city, postal,
+    cancellationReason, objection, callbackNotes, rescheduleReason, closedLostReason,
   } = req.body;
   const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
   if (!appt) return res.status(404).json({ error: 'Appointment not found.' });
@@ -503,7 +534,10 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
       return res.status(409).json({ error: 'Ce closer a bloqué ce créneau — RDV impossible à cette date/heure.' });
     }
   }
-  const sets = [];
+    if (status && status !== appt.status && isApptStatusLockBlocking(req.user.role, status) && !apptStatusLockSatisfied(appt, status, req.body)) {
+    return res.status(400).json({ error: APPT_STATUS_LOCK_MESSAGES[status] });
+  }
+const sets = [];
   const params = [];
   if (status !== undefined)   { sets.push('status = ?');    params.push(status); }
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate); }
@@ -513,6 +547,11 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   if (notes !== undefined)    { sets.push('notes = ?');     params.push(notes || null); }
   // Photos du RDV (callback) — tableau JSON d'URLs Cloudinary, meme convention que deals/ad_leads.
   if (photoUrls !== undefined) { sets.push('photo_urls = ?'); params.push(JSON.stringify(Array.isArray(photoUrls) ? photoUrls : [])); }
+  if (cancellationReason !== undefined) { sets.push('cancellation_reason = ?'); params.push(cancellationReason || null); }
+  if (objection !== undefined)          { sets.push('objection = ?');           params.push(objection || null); }
+  if (callbackNotes !== undefined)      { sets.push('callback_notes = ?');      params.push(callbackNotes || null); }
+  if (rescheduleReason !== undefined)   { sets.push('reschedule_reason = ?');   params.push(rescheduleReason || null); }
+  if (closedLostReason !== undefined)   { sets.push('closed_lost_reason = ?');  params.push(closedLostReason || null); }
   if (sets.length) {
     sets.push("updated_at = datetime('now')");
     params.push(id);
@@ -555,6 +594,9 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   if (status === 'Closed Won' || status === 'Closed Lost') {
     const linkedAdLead = get('SELECT id, first_name, last_name, ghl_contact_id FROM ad_leads WHERE appointment_id = ?', [id]);
     if (linkedAdLead) {
+      if (status === 'Closed Lost') {
+        run('UPDATE ad_leads SET closed_lost_reason = ? WHERE id = ?', [closedLostReason || appt.closed_lost_reason || null, linkedAdLead.id]);
+      }
       run('UPDATE ad_leads SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, linkedAdLead.id]);
       const adLeadName = `${linkedAdLead.first_name || ''} ${linkedAdLead.last_name || ''}`.trim() || 'Client';
       notifyRole('owner', `💰 ${LABEL_LEADS} Lead ${status === 'Closed Won' ? 'fermé' : 'perdu'} (Queue): ${adLeadName}`,
@@ -1250,10 +1292,21 @@ function isQualificationBlocking(lead, actorRole, targetStatus) {
   return true;
 }
 const QUALIFICATION_LOCK_MESSAGE = 'Veuillez compléter la fiche de qualification avant de pouvoir déplacer ce lead vers un autre statut.';
+// Meme verrou que isApptStatusLockBlocking (voir PATCH /appointments/:id) applique ici pour le
+// cas ou "Closed Lost" est change directement sur la fiche/kanban Leads CRM plutot que via un
+// vrai RDV booke. Seul lead_closer est bloque ; owner/team_leader_vente peut toujours forcer.
+function isAdLeadClosedLostBlocking(actorRole) { return actorRole === 'lead_closer'; }
+const AD_LEAD_CLOSED_LOST_LOCK_MESSAGE = 'Veuillez indiquer la raison de la perte et ajouter une photo de la soumission avant de marquer ce lead Closed Lost.';
+function adLeadClosedLostSatisfied(lead, body) {
+  const effReason = body.closedLostReason !== undefined ? body.closedLostReason : lead.closed_lost_reason;
+  const effPhotos = body.quoteImageUrls !== undefined ? body.quoteImageUrls : JSON.parse(lead.quote_image_urls || '[]');
+  return effReason != null && String(effReason).trim().length > 0 && Array.isArray(effPhotos) && effPhotos.length > 0;
+}
+
 
 router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) => {
   const { id } = req.params;
-  const { status, claim, apptDate, apptHour, notes, quoteImageUrls } = req.body;
+  const { status, claim, apptDate, apptHour, notes, quoteImageUrls, closedLostReason } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
@@ -1263,6 +1316,9 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
   // qualifier le lead (prendre le RDV fait partie de la fiche elle-meme, voir Q11).
   if (status && status !== lead.status && isQualificationBlocking(lead, req.user.role, status)) {
     return res.status(400).json({ error: QUALIFICATION_LOCK_MESSAGE });
+  if (status === 'Closed Lost' && status !== lead.status && isAdLeadClosedLostBlocking(req.user.role) && !adLeadClosedLostSatisfied(lead, req.body)) {
+    return res.status(400).json({ error: AD_LEAD_CLOSED_LOST_LOCK_MESSAGE });
+  }
   }
 
   const sets = ["updated_at = datetime('now')"];
@@ -1275,6 +1331,7 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate || null); }
   if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseFloat(apptHour) : null); }
   if (notes !== undefined) { sets.push('notes = ?'); params.push(notes || null); }
+  if (closedLostReason !== undefined) { sets.push('closed_lost_reason = ?'); params.push(closedLostReason || null); }
   // Image(s) de soumission/quote (etape "Left Quote") — le front envoie toujours le tableau
   // complet (existant + nouvelles URLs Cloudinary), meme convention que deals.photo_urls : on
   // remplace la colonne entiere plutot que d'append cote serveur.
