@@ -462,11 +462,19 @@ router.get('/appointments', requireAuth, requireD2DOnly, (req, res) => {
        l.first_name || ' ' || l.last_name AS name,
        l.phone, l.email, l.address, l.city, l.postal,
        s.first_name || ' ' || s.last_name AS setter_name,
-       c.first_name || ' ' || c.last_name AS closer_name
+       c.first_name || ' ' || c.last_name AS closer_name,
+              al.id AS ad_lead_id,
+                     al.building_type AS al_building_type, al.calfeutrage_condition AS al_calfeutrage_condition,
+                            al.zones_to_seal AS al_zones_to_seal, al.project_details AS al_project_details,
+                                   al.qual_units_count, al.qual_building_type, al.qual_sealant_color, al.qual_sealant_color_other,
+                                          al.qual_language, al.qual_reasons, al.qual_reasons_other, al.qual_timeline,
+                                                 al.qual_other_renovations, al.qual_other_renovations_which, al.qual_renovation_priority,
+                                                        al.qual_decision_maker_involved
      FROM appointments a
      LEFT JOIN leads l ON a.lead_id   = l.id
      LEFT JOIN users s ON a.setter_id = s.id
      LEFT JOIN users c ON a.closer_id = c.id
+            LEFT JOIN ad_leads al ON al.appointment_id = a.id
      ORDER BY a.appt_date DESC, a.appt_hour DESC`
   );
   // photo_urls stocke en JSON (voir deals.photo_urls / ad_leads.quote_image_urls, meme convention)
