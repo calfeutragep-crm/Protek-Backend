@@ -133,6 +133,18 @@ function requireLeadsCrmCloser(req, res, next) {
   }
   next();
 }
+// Demande utilisateur 2026-09-15 : la section "Queue" du Leads CRM (pipeline des leads
+// marketing — statut, fiche de qualification, prise de RDV) devient owner-only. lead_marketing
+// et lead_closer gardent leur acces au reste (GET /leads-crm/leads en lecture pour leur
+// Calendrier, Cost, Base) — voir requireLeadsCrmAccess ci-dessus, inchange — mais perdent les
+// actions ci-dessous, qui deplacaient un lead dans le pipeline. Applique UNIQUEMENT aux routes
+// qui modifient un ad_lead (statut/qualification/booking), jamais a la lecture seule.
+function requireQueueOwner(req, res, next) {
+  if (req.user.role !== 'owner') {
+    return res.status(403).json({ error: 'Section Queue réservée au owner.' });
+  }
+  next();
+}
 function requireD2DOnly(req, res, next) {
   const r = req.user.role;
   if (r === 'lead_marketing' || r === 'lead_closer') {
@@ -524,6 +536,24 @@ router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
     const deal = get('SELECT * FROM deals WHERE appointment_id = ?', [id]);
     if (deal) createTicketFromDeal(deal);
   }
+  // Sync retour vers le Leads CRM (Queue, owner-only) — demande utilisateur 2026-09-15 : quand
+  // le closer/team_leader_vente ferme (won OU perdu) un RDV qui a ete booke depuis un lead
+  // marketing (voir POST /leads-crm/leads/:id/book, qui relie ad_leads.appointment_id a CE
+  // rendez-vous), le statut doit se repercuter automatiquement dans la Queue, sans action
+  // manuelle de l'owner. "Closed Won" est deja gere plus haut par POST /deals quand adLeadId est
+  // fourni (voir plus bas) — ce bloc-ci couvre en plus le cas ou le statut est change ICI, sur le
+  // RDV directement (bouton statut de la fiche RDV), qui est le chemin le plus frequent pour
+  // "Closed Lost" (aucun deal n'est jamais cree pour un RDV perdu).
+  if (status === 'Closed Won' || status === 'Closed Lost') {
+    const linkedAdLead = get('SELECT id, first_name, last_name, ghl_contact_id FROM ad_leads WHERE appointment_id = ?', [id]);
+    if (linkedAdLead) {
+      run('UPDATE ad_leads SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, linkedAdLead.id]);
+      const adLeadName = `${linkedAdLead.first_name || ''} ${linkedAdLead.last_name || ''}`.trim() || 'Client';
+      notifyRole('owner', `💰 ${LABEL_LEADS} Lead ${status === 'Closed Won' ? 'fermé' : 'perdu'} (Queue): ${adLeadName}`,
+        { title: `💰 Queue mise à jour ${LABEL_LEADS}`, body: `${adLeadName} — ${status}`, url: '/' });
+      if (status === 'Closed Won' && linkedAdLead.ghl_contact_id) markOpportunityWon(linkedAdLead.ghl_contact_id);
+    }
+  }
   // Le setter qui a pose ce rendez-vous veut savoir ce qu'il est devenu (ferme, perdu, no-show,
   // etc.) — c'est son travail de prospection qui est en jeu. Notifie a CHAQUE changement de
   // statut, quel qu'il soit (pas seulement Closed Won), voir demande utilisateur.
@@ -572,6 +602,17 @@ router.post('/deals', requireAuth, requireDealCreateAccess, (req, res) => {
     adLeadId, selfLead,
   } = req.body;
   if (!clientName) return res.status(400).json({ error: 'clientName required.' });
+  // Auto-resolution de adLeadId depuis appointmentId — le front (formulaire de deal D2D
+  // classique, openDealSheet) n'envoie jamais adLeadId : il n'a aucune notion des leads
+  // marketing. Si ce rendez-vous a ete booke depuis la Queue (voir POST
+  // /leads-crm/leads/:id/book, qui relie ad_leads.appointment_id), on retrouve le lead ici pour
+  // que deals.ad_lead_id et la synchro "Closed Won" ci-dessous fonctionnent meme quand adLeadId
+  // n'est pas explicitement fourni — demande utilisateur 2026-09-15 "Queue admin-only".
+  let resolvedAdLeadId = adLeadId || null;
+  if (!resolvedAdLeadId && appointmentId) {
+    const linkedAdLead = get('SELECT id FROM ad_leads WHERE appointment_id = ?', [appointmentId]);
+    if (linkedAdLead) resolvedAdLeadId = linkedAdLead.id;
+  }
   // Audit 2026-09-07 (test end-to-end) : rien n'empechait un prix negatif d'etre envoye ici — un
   // deal se referme forcement sur une VENTE, jamais un montant negatif (un remboursement/
   // ajustement est une operation distincte, pas encore definie cote produit — voir cartographie
@@ -611,25 +652,25 @@ router.post('/deals', requireAuth, requireDealCreateAccess, (req, res) => {
       workFront || null, workRight || null, workLeft || null, workRear || null,
       notes || null, photoUrlsJson, 'Pending Installation',
       obstaclesToRemove || null, toolsNeeded || null, toolsNotes || null,
-      adLeadId || null, isSelfLead ? 1 : 0,
+      resolvedAdLeadId || null, isSelfLead ? 1 : 0,
     ]
   );
   const newDeal = get('SELECT * FROM deals WHERE id = ?', [dealId]);
   if (newDeal) createTicketFromDeal(newDeal);
   syncCommissionsForDeal(dealId);
-  if (adLeadId) {
-    run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [adLeadId]);
+  if (resolvedAdLeadId) {
+    run(`UPDATE ad_leads SET status = 'Closed Won', updated_at = datetime('now') WHERE id = ?`, [resolvedAdLeadId]);
     // Repousse vers GoHighLevel : marque l'opportunite correspondante "won". Fire-and-forget
     // (voir ghlClient.js) — un souci cote GHL ne doit jamais retarder ou faire echouer la
     // creation du deal cote Protek.
-    const closedAdLead = get('SELECT ghl_contact_id FROM ad_leads WHERE id = ?', [adLeadId]);
+    const closedAdLead = get('SELECT ghl_contact_id FROM ad_leads WHERE id = ?', [resolvedAdLeadId]);
     if (closedAdLead && closedAdLead.ghl_contact_id) markOpportunityWon(closedAdLead.ghl_contact_id);
   }
   const dealPrice = parseFloat(price) || 0;
   // Notification chat — aucune donnee client (pas de nom, prix, ou photo), juste
   // le compteur attribue au closer, avec le setter qui a pris le rendez-vous d'origine.
   // (Les deals issus du Leads CRM ne postent pas dans le chat porte-a-porte — sections isolees.)
-  if (!adLeadId) {
+  if (!resolvedAdLeadId) {
     const closerUser = closerId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [closerId]) : null;
     const setterUser = setterId ? get('SELECT first_name, last_name FROM users WHERE id = ?', [setterId]) : null;
     const closerName = closerUser ? `${closerUser.first_name} ${closerUser.last_name}` : 'Closer inconnu';
@@ -1202,7 +1243,7 @@ function isQualificationBlocking(lead, actorRole, targetStatus) {
 }
 const QUALIFICATION_LOCK_MESSAGE = 'Veuillez compléter la fiche de qualification avant de pouvoir déplacer ce lead vers un autre statut.';
 
-router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, res) => {
+router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) => {
   const { id } = req.params;
   const { status, claim, apptDate, apptHour, notes, quoteImageUrls } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
@@ -1282,7 +1323,7 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireLeadsCrmAccess, (req, r
 // timestamp, et lui seul, que le verrou de statut ci-dessus consulte. Tant que la validation
 // echoue, on sauvegarde quand meme les reponses fournies (permet un remplissage progressif
 // pendant l'appel) mais qualification_completed_at reste NULL — le lead reste bloque.
-router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireLeadsCrmAccess, (req, res) => {
+router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireQueueOwner, (req, res) => {
   const { id } = req.params;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
@@ -1342,6 +1383,75 @@ router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireLeadsCrmA
   );
 
   return res.json({ message: complete ? 'Qualification complétée.' : 'Qualification enregistrée (incomplète).', complete, missing });
+});
+
+// POST /leads-crm/leads/:id/book — owner uniquement (voir requireQueueOwner) : booke le RDV
+// d'un lead marketing dans le VRAI horaire d'un closer ou team_leader_vente porte-a-porte (le
+// meme calendrier que le CRM D2D et Référencement), au lieu du simple champ appt_date/appt_hour
+// autonome utilise jusqu'ici sur ad_leads. Modele directement sur
+// POST /referencement/leads/:id/book : cree une vraie ligne leads + appointments (meme check de
+// blackout via isSlotBlocked), puis relie le ad_lead a ce RDV (ad_leads.lead_id/appointment_id,
+// meme convention que referral_leads.lead_id/appointment_id) pour que PATCH /appointments/:id
+// puisse resynchroniser automatiquement le statut du lead marketing quand le closer ferme le
+// rendez-vous (Closed Won/Closed Lost — voir plus bas).
+router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, res) => {
+  const { id } = req.params;
+  const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+  const { closerId, apptDate, apptHour, address, city, postal } = req.body;
+  if (!closerId) return res.status(400).json({ error: 'closerId requis.' });
+  const closer = get(
+    `SELECT u.id, u.first_name, u.last_name FROM users u
+     JOIN roles r ON u.role_id = r.id
+     WHERE u.id = ? AND r.name IN ('closer', 'team_leader_vente') AND u.status = 'active'`,
+    [closerId]
+  );
+  if (!closer) return res.status(400).json({ error: 'closerId invalide (doit être un closer ou team leader vente actif).' });
+  if (!apptDate) return res.status(400).json({ error: 'apptDate requis.' });
+  const finalCity = city || lead.city;
+  if (!finalCity) return res.status(400).json({ error: 'city requis.' });
+  const hour = parseFloat(apptHour);
+  const finalHour = isNaN(hour) ? 14 : hour;
+
+  if (isSlotBlocked(closerId, apptDate, finalHour)) {
+    return res.status(409).json({ error: 'Ce closer a bloqué ce créneau — RDV impossible à cette date/heure.' });
+  }
+
+  const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
+  const leadId = uuid();
+  run(
+    `INSERT INTO leads (id, first_name, last_name, phone, email, address, city, postal, notes, setter_id, closer_id, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')`,
+    [leadId, lead.first_name || '', lead.last_name || '', lead.phone, lead.email, address || null, finalCity, postal || null,
+     `${LABEL_LEADS} ${lead.notes || ''}`.trim(), null, closerId]
+  );
+  const apptId = uuid();
+  run(
+    `INSERT INTO appointments (id, lead_id, setter_id, closer_id, appt_date, appt_hour, status, notes)
+     VALUES (?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
+    [apptId, leadId, null, closerId, apptDate, finalHour, `${LABEL_LEADS} suivi lead marketing`]
+  );
+  // Meme progression automatique que le PATCH classique (voir plus haut) : booker un RDV fait
+  // toujours avancer le lead vers "Appointment Set", sauf s'il est deja dans un etat final.
+  const TERMINAL_STATUSES_BOOK = ['Closed Won', 'Closed Lost', 'No Show', 'Not Qualified'];
+  const nextStatus = TERMINAL_STATUSES_BOOK.includes(lead.status) ? lead.status : 'Appointment Set';
+  run(
+    `UPDATE ad_leads SET
+       status = ?, closer_id = ?, appt_date = ?, appt_hour = ?, lead_id = ?, appointment_id = ?,
+       contacted_at = COALESCE(contacted_at, ?), updated_at = datetime('now')
+     WHERE id = ?`,
+    [nextStatus, closerId, apptDate, finalHour, leadId, apptId, new Date().toISOString(), id]
+  );
+
+  const closerName = `${closer.first_name} ${closer.last_name}`;
+  notifyUser(closerId, `📅 ${LABEL_LEADS} Nouveau RDV: ${leadName} le ${apptDate}`,
+    { title: `📅 Nouveau RDV ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
+  notifyRole('owner', `📅 ${LABEL_LEADS} RDV booké pour ${closerName}: ${leadName} le ${apptDate}`,
+    { title: `📅 RDV booké ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
+  if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
+
+  return res.status(201).json({ message: 'Rendez-vous booké.', leadId, appointmentId: apptId });
 });
 
 // ── Notes horodatees (Leads CRM) — historique append-only distinct du champ ad_leads.notes
