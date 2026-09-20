@@ -2275,4 +2275,24 @@ router.delete('/referencement/leads/:id', requireAuth, requireOwner, (req, res) 
   return res.json({ message: 'Lead référencement supprimé.' });
 });
 
+// === App d'inspection (Ouvertures/Calfeutrage) — envoi du rapport d'inspection par courriel au client ===
+// Ajout additif uniquement : ne modifie aucune route existante.
+router.post('/deals/:id/send-report', requireAuth, (req, res) => {
+  const { email, pdfUrl, clientName } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required.' });
+  if (!pdfUrl) return res.status(400).json({ error: 'pdfUrl required.' });
+  const deal = get('SELECT id, client_name, notes FROM deals WHERE id = ?', [req.params.id]);
+  if (!deal) return res.status(404).json({ error: 'Deal not found.' });
+  run(
+    `UPDATE deals SET notes = COALESCE(notes,'') || ?, updated_at = datetime('now') WHERE id = ?`,
+    [`\n[Rapport d'inspection envoyé — ${pdfUrl}]`, req.params.id]
+  );
+  sendEmail({
+    to: email,
+    subject: `Rapport d'inspection de calfeutrage — ${clientName || deal.client_name || ''}`,
+    text: `Bonjour,\n\nVoici le lien vers votre rapport d'inspection de calfeutrage réalisé par Groupe Protek Calfeutrage Inc. :\n${pdfUrl}\n\nMerci de votre confiance,\nGroupe Protek Calfeutrage Inc.\nLicence RBQ : 5869-2401-01\n438-405-4195 · calfeutrageprotek.com`,
+  }).catch(() => {});
+  return res.json({ message: 'Rapport envoyé.', pdfUrl });
+});
+
 module.exports = router;
