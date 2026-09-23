@@ -621,6 +621,67 @@ const sets = [];
   return res.json({ message: 'Appointment updated.' });
 });
 
+// DELETE /appointments/:id — owner uniquement (voir requireOwner). Demande utilisateur
+// 2026-09-23 : pouvoir supprimer un rendez-vous depuis l'horaire d'un closer en "Vue de"
+// (impersonation) — ex. un RDV cree par erreur/en double qui bloque un creneau pour rien.
+// Reserve a owner (pas closer/setter/team_leader_vente) car c'est destructif et sans piste
+// de retour ; l'impersonation cote frontend ne change de toute facon jamais le role reel
+// verifie ici (req.user.role reste celui du compte owner connecte, meme en Vue de — voir
+// commentaire "impersonation via le token de l'owner" ailleurs dans ce fichier).
+//
+// Protections avant suppression (aucune perte de donnees financieres/historique) :
+//  - Refuse si un deal ou un ticket d'installation reference deja ce RDV (deals.appointment_id /
+//    installation_tickets.appointment_id) — supprimer effacerait silencieusement une vente
+//    fermee ou un dossier d'installation en cours. L'owner doit d'abord traiter le deal/ticket.
+//  - Si un lead marketing (ad_leads) ou un lead de referencement (referral_leads) pointait vers
+//    ce RDV, on delie seulement le lien (lead_id/appointment_id remis a NULL) plutot que de
+//    toucher au lead lui-meme — le lead redevient "non booke", rebookable normalement, rien de
+//    son historique (qualification, notes, statut) n'est perdu.
+//  - Le message de "demande de prix" (chat_messages, type cost_request) lie a ce RDV est
+//    conserve tel quel (utile pour la paie/comptabilite) — seul son lien appointment_id est
+//    retire pour ne pas pointer vers un RDV supprime.
+//  - La ligne `leads` porte-a-porte d'origine (nom/tel/adresse du client, historique setter)
+//    N'EST PAS supprimee — seul le RENDEZ-VOUS (le blocage de creneau) l'est. Supprimer le lead
+//    lui-meme n'a jamais ete demande et effacerait un historique de prospection reel.
+router.delete('/appointments/:id', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const appt = get('SELECT * FROM appointments WHERE id = ?', [id]);
+  if (!appt) return res.status(404).json({ error: 'Rendez-vous introuvable.' });
+
+  const deal = get('SELECT id FROM deals WHERE appointment_id = ?', [id]);
+  if (deal) {
+    return res.status(409).json({ error: 'Ce rendez-vous a un deal associé — impossible de le supprimer tant que le deal existe.' });
+  }
+  const ticket = get('SELECT id FROM installation_tickets WHERE appointment_id = ?', [id]);
+  if (ticket) {
+    return res.status(409).json({ error: 'Ce rendez-vous a un dossier d\'installation associé — impossible de le supprimer.' });
+  }
+
+  const linkedAdLead = get('SELECT id FROM ad_leads WHERE appointment_id = ?', [id]);
+  if (linkedAdLead) {
+    run("UPDATE ad_leads SET lead_id = NULL, appointment_id = NULL, updated_at = datetime('now') WHERE id = ?", [linkedAdLead.id]);
+  }
+  const linkedReferral = get('SELECT id FROM referral_leads WHERE appointment_id = ?', [id]);
+  if (linkedReferral) {
+    run("UPDATE referral_leads SET lead_id = NULL, appointment_id = NULL, updated_at = datetime('now') WHERE id = ?", [linkedReferral.id]);
+  }
+  run('UPDATE chat_messages SET appointment_id = NULL WHERE appointment_id = ?', [id]);
+
+  run('DELETE FROM appointments WHERE id = ?', [id]);
+
+  const lead = appt.lead_id ? get('SELECT first_name, last_name FROM leads WHERE id = ?', [appt.lead_id]) : null;
+  const name = lead ? `${lead.first_name} ${lead.last_name}` : 'Client';
+  if (appt.closer_id) {
+    notifyUser(appt.closer_id, `🗑️ ${LABEL_D2D} Rendez-vous supprimé par l'admin — ${name} (${appt.appt_date || '?'})`,
+      { title: `🗑️ RDV supprimé ${LABEL_D2D}`, body: `${name} — ${appt.appt_date || '?'}`, url: '/' });
+  }
+  if (appt.setter_id && appt.setter_id !== appt.closer_id) {
+    notifyUser(appt.setter_id, `🗑️ ${LABEL_D2D} Rendez-vous supprimé par l'admin — ${name} (${appt.appt_date || '?'})`,
+      { title: `🗑️ RDV supprimé ${LABEL_D2D}`, body: `${name} — ${appt.appt_date || '?'}`, url: '/' });
+  }
+  return res.json({ message: 'Rendez-vous supprimé.' });
+});
+
 router.get('/deals', requireAuth, (req, res) => {
   const rows = query(
     `SELECT d.*,
