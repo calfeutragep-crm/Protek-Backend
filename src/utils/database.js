@@ -602,6 +602,16 @@ function migrateNewColumns() {
   { table: 'appointments', column: 'reschedule_reason', def: 'TEXT' },
   { table: 'appointments', column: 'closed_lost_reason', def: 'TEXT' },
   { table: 'ad_leads', column: 'closed_lost_reason', def: 'TEXT' },
+  // Mini-app "Soumission Calfeutrage" (2026-09-29, suite) : iOS ignore completement les champs
+  // icon/badge du payload push et affiche TOUJOURS l'icone de l'app installee sur l'ecran
+  // d'accueil — impossible de differencier le logo par notification au sein d'UNE SEULE app.
+  // Une deuxieme app dediee a donc ete creee (voir /soumission-app/ cote frontend), avec son
+  // propre abonnement push. Ce tag route chaque abonnement vers son app d'origine ('main' =
+  // l'app Protek principale, 'soumission-calfeutrage' = la mini-app) pour que
+  // notifyRole/sendPushToUser (voir utils/push.js) puissent envoyer CHAQUE type de notif
+  // uniquement aux abonnements de l'app concernee — sinon un owner ayant installe les deux apps
+  // recevrait CHAQUE notification en double (une fois par app).
+  { table: 'push_subscriptions', column: 'app', def: "TEXT NOT NULL DEFAULT 'main'" },
   ];
   let changed = false;
   migrations.forEach(({ table, column, def }) => {

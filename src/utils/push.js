@@ -20,13 +20,18 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   console.warn('[push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — push notifications disabled.');
 }
 
-// Envoie une notification push a TOUS les appareils abonnes d'un utilisateur (un utilisateur peut
-// avoir plusieurs abonnements : telephone + ordinateur, par exemple). Best-effort : un abonnement
-// expire/invalide (410/404 de Google/Apple) est supprime silencieusement de la base plutot que de
-// faire echouer l'appelant.
-async function sendPushToUser(userId, payload) {
+// Envoie une notification push a TOUS les appareils abonnes d'un utilisateur pour une "app"
+// donnee (un utilisateur peut avoir plusieurs abonnements : telephone + ordinateur, ET depuis
+// 2026-09-29 potentiellement plusieurs APPS distinctes — voir migration push_subscriptions.app).
+// `app` par defaut 'main' (l'app Protek principale) — seule la mini-app Soumission Calfeutrage
+// passe explicitement 'soumission-calfeutrage' (voir insertSoumissionCalfeutrageLead dans
+// routes/index.js). Filtrer par app est ce qui evite qu'un owner ayant installe les deux apps
+// recoive CHAQUE notification en double. Best-effort : un abonnement expire/invalide (410/404 de
+// Google/Apple) est supprime silencieusement de la base plutot que de faire echouer l'appelant.
+async function sendPushToUser(userId, payload, app) {
   if (!configured) return;
-  const subs = query('SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?', [userId]);
+  const targetApp = app || 'main';
+  const subs = query('SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ? AND app = ?', [userId, targetApp]);
   const body = JSON.stringify(payload);
   await Promise.all(subs.map(async (s) => {
     try {

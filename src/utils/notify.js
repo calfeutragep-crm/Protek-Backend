@@ -19,23 +19,27 @@ function activeUsersByRole(roleNames) {
   );
 }
 
-// pushPayload optionnel : {title, body, url} — si omis, on derive un payload simple depuis message.
-function notifyUser(userId, message, pushPayload) {
+// pushPayload optionnel : {title, body, url, icon?} — si omis, on derive un payload simple depuis
+// message. `app` optionnel (defaut 'main' dans sendPushToUser) route le push vers les abonnements
+// de cette app uniquement — voir commentaire sur sendPushToUser (utils/push.js) et la mini-app
+// Soumission Calfeutrage (seul appelant a passer 'soumission-calfeutrage' pour l'instant). La
+// cloche in-app (table notifications), elle, n'a pas de notion d'app — toujours ecrite pareil.
+function notifyUser(userId, message, pushPayload, app) {
   if (!userId) return;
   run('INSERT INTO notifications (id, user_id, message) VALUES (?, ?, ?)', [uuid(), userId, message]);
-  sendPushToUser(userId, pushPayload || { title: 'Protek CRM', body: message, url: '/' }).catch(() => {});
+  sendPushToUser(userId, pushPayload || { title: 'Protek CRM', body: message, url: '/' }, app).catch(() => {});
 }
 
-function notifyUsers(userIds, message, pushPayload) {
-  (userIds || []).forEach(id => notifyUser(id, message, pushPayload));
+function notifyUsers(userIds, message, pushPayload, app) {
+  (userIds || []).forEach(id => notifyUser(id, message, pushPayload, app));
 }
 
 // Notifie tous les utilisateurs actifs d'un/des role(s), en excluant optionnellement l'auteur de
 // l'action (ex: ne pas notifier le closer qui vient lui-meme de poster un message de chat).
-function notifyRole(roleNames, message, pushPayload, excludeUserId) {
+function notifyRole(roleNames, message, pushPayload, excludeUserId, app) {
   activeUsersByRole(roleNames).forEach(u => {
     if (excludeUserId && u.id === excludeUserId) return;
-    notifyUser(u.id, message, pushPayload);
+    notifyUser(u.id, message, pushPayload, app);
   });
 }
 
