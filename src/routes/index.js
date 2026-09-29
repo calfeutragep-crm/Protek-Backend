@@ -2364,8 +2364,13 @@ function insertSoumissionCalfeutrageLead({ fullName, phone, email, street, city,
   );
   // Owner uniquement — jamais les rôles de vente, comme after-sales (choix explicite "Admin
   // seulement" de l'utilisateur).
+  // `icon` : logo dédié Soumission Calfeutrage (fourni par l'utilisateur) au lieu de l'icône
+  // générique Protek — le service worker (sw.js, push handler) lit ce champ optionnel et
+  // retombe sur l'icône par défaut si absent, donc tous les AUTRES flux de notifications
+  // (Leads CRM, after-sales, etc.) restent inchangés.
   notifyRole('owner', `🧾 [Soumission Calfeutrage] Nouveau lead: ${fullName} — ${phone}`,
-    { title: '🧾 Nouveau lead Soumission Calfeutrage', body: `${fullName} — ${phone}`, url: '/' });
+    { title: '🧾 Nouveau lead Soumission Calfeutrage', body: `${fullName} — ${phone}`, url: '/',
+      icon: 'https://crmprotek.netlify.app/icons/icon-soumission-calfeutrage-192.png' });
   return id;
 }
 
