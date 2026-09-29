@@ -1013,15 +1013,21 @@ router.get('/push/vapid-public-key', (req, res) => {
 // Enregistre (ou met a jour) l'abonnement push de l'appareil courant pour l'utilisateur connecte.
 // Un utilisateur peut avoir plusieurs abonnements actifs (telephone + ordinateur) — on upsert sur
 // endpoint (unique par appareil/navigateur) plutot que de remplacer l'abonnement precedent.
+// `app` (optionnel, defaut 'main') tague l'abonnement selon l'app front qui l'a cree — voir
+// migration push_subscriptions.app et IS_SC_APP cote frontend (index.html). Valeur non reconnue
+// repliee sur 'main' plutot que rejetee, pour ne jamais casser un ancien client qui n'envoie pas
+// ce champ ou une future app dont on n'aurait pas encore prevu le nom exact ici.
+const PUSH_SUBSCRIPTION_APPS = ['main', 'soumission-calfeutrage'];
 router.post('/push/subscribe', requireAuth, (req, res) => {
   const { endpoint, keys } = req.body || {};
   if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
     return res.status(400).json({ error: 'endpoint and keys.p256dh/keys.auth required.' });
   }
+  const app = PUSH_SUBSCRIPTION_APPS.includes(req.body.app) ? req.body.app : 'main';
   run(
-    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`,
-    [uuid(), req.user.id, endpoint, keys.p256dh, keys.auth]
+    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, app) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, app = excluded.app`,
+    [uuid(), req.user.id, endpoint, keys.p256dh, keys.auth, app]
   );
   return res.status(201).json({ message: 'Subscribed.' });
 });
@@ -2364,13 +2370,16 @@ function insertSoumissionCalfeutrageLead({ fullName, phone, email, street, city,
   );
   // Owner uniquement — jamais les rôles de vente, comme after-sales (choix explicite "Admin
   // seulement" de l'utilisateur).
-  // `icon` : logo dédié Soumission Calfeutrage (fourni par l'utilisateur) au lieu de l'icône
-  // générique Protek — le service worker (sw.js, push handler) lit ce champ optionnel et
-  // retombe sur l'icône par défaut si absent, donc tous les AUTRES flux de notifications
-  // (Leads CRM, after-sales, etc.) restent inchangés.
+  // `icon` : logo dédié Soumission Calfeutrage — n'a plus d'effet que sur Android (iOS ignore ce
+  // champ, voir mini-app dédiée ci-dessous), gardé quand même pour ne rien perdre côté Android.
+  // 5e argument ('soumission-calfeutrage') : route le push UNIQUEMENT vers les abonnements de la
+  // mini-app dédiée (voir push_subscriptions.app + POST /push/subscribe) — jamais vers l'app
+  // Protek principale, sinon double notification pour le même lead sur un owner ayant les deux
+  // apps installées. Voir sendPushToUser (utils/push.js) pour le filtrage par app.
   notifyRole('owner', `🧾 [Soumission Calfeutrage] Nouveau lead: ${fullName} — ${phone}`,
     { title: '🧾 Nouveau lead Soumission Calfeutrage', body: `${fullName} — ${phone}`, url: '/',
-      icon: 'https://crmprotek.netlify.app/icons/icon-soumission-calfeutrage-192.png' });
+      icon: 'https://crmprotek.netlify.app/icons/icon-soumission-calfeutrage-192.png' },
+    undefined, 'soumission-calfeutrage');
   return id;
 }
 
