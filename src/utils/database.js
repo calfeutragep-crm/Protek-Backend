@@ -415,6 +415,49 @@ function createSchema() {
       FOREIGN KEY(lead_id) REFERENCES leads(id),
       FOREIGN KEY(appointment_id) REFERENCES appointments(id)
     );
+    -- Soumission Calfeutrage (https://soumissioncalfeutrage.com/, site Lovable separe de
+    -- calfeutrageprotek.com) : file DEDIEE et COMPLETEMENT SEPAREE de ad_leads/referral_leads —
+    -- demande utilisateur 2026-09-29 "meme systeme de queue mais uniquement pour ces leads".
+    -- Suivi simple uniquement (PAS de booking/rendez-vous, choix explicite de l'utilisateur) et
+    -- acces reserve a owner uniquement (choix explicite, voir requireOwner sur les routes
+    -- /soumission-calfeutrage/* dans routes/index.js). Ingeree via POST
+    -- /webhooks/soumission-calfeutrage (meme cle partagee LEADS_WEBHOOK_SECRET que ad-leads/
+    -- after-sales/referencement). Champs alignes sur le formulaire du site (table "leads" de son
+    -- propre Supabase, voir drizzle/schema.ts du projet Lovable "Calfeutrage Facile") : le site
+    -- garde SA PROPRE base Supabase intacte (aucune donnee existante supprimee/deplacee), ce
+    -- webhook ne fait que RELAYER une copie de chaque nouvelle soumission vers ce CRM.
+    CREATE TABLE IF NOT EXISTS soumission_calfeutrage_leads (
+      id TEXT PRIMARY KEY,
+      full_name TEXT,
+      phone TEXT,
+      email TEXT,
+      street TEXT,
+      city TEXT,
+      postal_code TEXT,
+      property_type TEXT,
+      service_types TEXT DEFAULT '[]',
+      symptoms TEXT DEFAULT '[]',
+      scope_notes TEXT,
+      urgency TEXT,
+      requested_call_date TEXT,
+      requested_call_window TEXT,
+      quoted_price REAL,
+      status TEXT NOT NULL DEFAULT 'Nouveau',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    -- Notes horodatees (meme systeme que ad_lead_notes) sur un lead Soumission Calfeutrage —
+    -- journal append-only, jamais modifie/supprime, pour que "meme systeme de queue" tienne
+    -- aussi sur cet aspect precis demande par l'utilisateur.
+    CREATE TABLE IF NOT EXISTS soumission_calfeutrage_notes (
+      id TEXT PRIMARY KEY,
+      lead_id TEXT NOT NULL,
+      author_id TEXT,
+      body TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(lead_id) REFERENCES soumission_calfeutrage_leads(id),
+      FOREIGN KEY(author_id) REFERENCES users(id)
+    );
   `);
   saveDb();
 }
