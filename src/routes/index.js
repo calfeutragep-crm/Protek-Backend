@@ -2336,6 +2336,171 @@ router.delete('/referencement/leads/:id', requireAuth, requireOwner, (req, res) 
   return res.json({ message: 'Lead référencement supprimé.' });
 });
 
+// ═══════════════════════════════════════════
+// SOUMISSION CALFEUTRAGE — leads du site https://soumissioncalfeutrage.com/ (projet Lovable
+// "Calfeutrage Facile", séparé de calfeutrageprotek.com). Demande utilisateur 2026-09-29 : "je
+// veux que les leads qui viennent de soumissioncalfeutrage.com se rendent directement dans crm
+// protek. dans une queue completement differente (soumission calfeutrage). meme systeme de
+// queue. mais uniquement pour ces leads" — précisé ensuite par deux choix explicites : "Suivi
+// simple seulement" (PAS de booking calendrier closer, contrairement à Queue/ad_leads et
+// Référencement) et "Admin seulement" (owner uniquement, jamais team_leader_vente/closer/setter
+// — voir requireOwner ci-dessous sur CHAQUE route, jamais requireManagerOrOwner ni
+// requireReferencementAccess). Table dédiée (soumission_calfeutrage_leads), jamais mélangée à
+// ad_leads/referral_leads/after_sales_requests. Le site garde sa propre base Supabase intacte —
+// ce webhook ne fait que recevoir une COPIE de chaque nouvelle soumission (voir
+// src/lib/leads.functions.ts du projet Lovable, submitLead(), modifié pour relayer ici en plus
+// de son insertion Supabase existante, jamais à la place).
+// ═══════════════════════════════════════════
+function insertSoumissionCalfeutrageLead({ fullName, phone, email, street, city, postalCode, propertyType, serviceTypes, symptoms, scopeNotes, urgency, requestedCallDate, requestedCallWindow }) {
+  const id = uuid();
+  run(
+    `INSERT INTO soumission_calfeutrage_leads (
+       id, full_name, phone, email, street, city, postal_code, property_type,
+       service_types, symptoms, scope_notes, urgency, requested_call_date, requested_call_window, status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Nouveau')`,
+    [id, fullName, phone, email || null, street || null, city || null, postalCode || null, propertyType || null,
+     JSON.stringify(Array.isArray(serviceTypes) ? serviceTypes : []), JSON.stringify(Array.isArray(symptoms) ? symptoms : []),
+     scopeNotes || null, urgency || null, requestedCallDate || null, requestedCallWindow || null]
+  );
+  // Owner uniquement — jamais les rôles de vente, comme after-sales (choix explicite "Admin
+  // seulement" de l'utilisateur).
+  notifyRole('owner', `🧾 [Soumission Calfeutrage] Nouveau lead: ${fullName} — ${phone}`,
+    { title: '🧾 Nouveau lead Soumission Calfeutrage', body: `${fullName} — ${phone}`, url: '/' });
+  return id;
+}
+
+// POST /webhooks/soumission-calfeutrage — point d'entrée PUBLIC, protégé par SA PROPRE clé
+// dédiée SOUMISSION_CALFEUTRAGE_WEBHOOK_SECRET (volontairement DISTINCTE de LEADS_WEBHOOK_SECRET,
+// déjà partagée par /webhooks/ad-leads, /after-sales et /referencement) : soumissioncalfeutrage.com
+// est un projet Lovable séparé de calfeutrageprotek.com, avec sa propre gestion de secrets
+// serveur — utiliser une clé dédiée évite de devoir faire circuler/relire la clé partagée
+// existante (dont la valeur n'a pas besoin d'être connue ici) et ne touche à aucune des 3
+// intégrations déjà en place. Accepte les noms de champs du formulaire du site (voir leadSchema
+// dans src/lib/leads.functions.ts du projet Lovable "Calfeutrage Facile") avec quelques alias par
+// cohérence avec les autres webhooks.
+router.post('/webhooks/soumission-calfeutrage', webhookLimiter, (req, res) => {
+  const configuredSecret = process.env.SOUMISSION_CALFEUTRAGE_WEBHOOK_SECRET;
+  if (!configuredSecret) {
+    return res.status(503).json({ error: 'Webhook non configuré (SOUMISSION_CALFEUTRAGE_WEBHOOK_SECRET manquant).' });
+  }
+  const providedSecret = req.query.key || req.headers['x-webhook-secret'];
+  if (!secretsMatch(providedSecret, configuredSecret)) {
+    return res.status(401).json({ error: 'Clé webhook invalide.' });
+  }
+
+  const b = req.body || {};
+  const fullName = b.fullName || b.full_name || b.name || '';
+  const phone = b.phone || b.phone_number || b.phoneNumber || '';
+  const email = b.email || b.email_address || b.emailAddress || null;
+  const street = b.street || b.address || b.adresse || null;
+  const city = b.city || b.ville || null;
+  const postalCode = b.postalCode || b.postal_code || b.codePostal || null;
+  const propertyType = b.propertyType || b.property_type || null;
+  const serviceTypes = b.serviceTypes || b.service_types || [];
+  const symptoms = b.symptoms || [];
+  const scopeNotes = b.scopeNotes || b.scope_notes || b.notes || b.message || null;
+  const urgency = b.urgency || null;
+  const requestedCallDate = b.requestedCallDate || b.requested_call_date || null;
+  const requestedCallWindow = b.requestedCallWindow || b.requested_call_window || null;
+
+  if (!fullName || !phone) {
+    return res.status(400).json({ error: 'fullName (ou name) et phone requis.' });
+  }
+
+  // Anti-doublon (même fenêtre de 5 min que /webhooks/ad-leads et /webhooks/referencement) — une
+  // resoumission accidentelle du formulaire ne crée pas deux fois le même lead.
+  const normalizedPhone = phone.replace(/\D/g, '');
+  if (normalizedPhone) {
+    const recentDup = get(
+      `SELECT id FROM soumission_calfeutrage_leads
+       WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'-',''),' ',''),'(',''),')','') = ?
+         AND created_at >= datetime('now', '-5 minutes')
+       ORDER BY created_at DESC LIMIT 1`,
+      [normalizedPhone]
+    );
+    if (recentDup) {
+      return res.status(200).json({ message: 'Lead déjà reçu (doublon évité).', id: recentDup.id });
+    }
+  }
+
+  try {
+    const id = insertSoumissionCalfeutrageLead({ fullName, phone, email, street, city, postalCode, propertyType, serviceTypes, symptoms, scopeNotes, urgency, requestedCallDate, requestedCallWindow });
+    return res.status(201).json({ message: 'Lead created.', id });
+  } catch (e) {
+    console.error('webhook soumission-calfeutrage error', e);
+    return res.status(500).json({ error: 'Insertion échouée.' });
+  }
+});
+
+// GET /soumission-calfeutrage — owner uniquement (choix explicite utilisateur "Admin seulement").
+router.get('/soumission-calfeutrage', requireAuth, requireOwner, (req, res) => {
+  const rows = query('SELECT * FROM soumission_calfeutrage_leads ORDER BY created_at DESC');
+  rows.forEach(r => {
+    try { r.service_types = JSON.parse(r.service_types || '[]'); } catch { r.service_types = []; }
+    try { r.symptoms = JSON.parse(r.symptoms || '[]'); } catch { r.symptoms = []; }
+  });
+  return res.json(rows);
+});
+
+// PATCH /soumission-calfeutrage/:id — statut/prix — owner uniquement. Pas de champ closerId : ce
+// pipeline n'a délibérément aucune notion d'assignation/booking (choix explicite "Suivi simple").
+router.patch('/soumission-calfeutrage/:id', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const lead = get('SELECT * FROM soumission_calfeutrage_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const { status, quotedPrice } = req.body;
+  const sets = [];
+  const params = [];
+  if (status !== undefined) { sets.push('status = ?'); params.push(status); }
+  if (quotedPrice !== undefined) { sets.push('quoted_price = ?'); params.push(quotedPrice === null || quotedPrice === '' ? null : Number(quotedPrice)); }
+  if (!sets.length) return res.status(400).json({ error: 'Rien à mettre à jour.' });
+  sets.push("updated_at = datetime('now')");
+  params.push(id);
+  run(`UPDATE soumission_calfeutrage_leads SET ${sets.join(', ')} WHERE id = ?`, params);
+  return res.json({ message: 'Lead mis à jour.' });
+});
+
+// DELETE /soumission-calfeutrage/:id — owner uniquement (purge de données de test/erreur, même
+// convention que DELETE /after-sales/:id et /referencement/leads/:id).
+router.delete('/soumission-calfeutrage/:id', requireAuth, requireOwner, (req, res) => {
+  const lead = get('SELECT id FROM soumission_calfeutrage_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  run('DELETE FROM soumission_calfeutrage_notes WHERE lead_id = ?', [req.params.id]);
+  run('DELETE FROM soumission_calfeutrage_leads WHERE id = ?', [req.params.id]);
+  return res.json({ message: 'Lead Soumission Calfeutrage supprimé.' });
+});
+
+// Notes horodatées (même système que ad_lead_notes / GET+POST /leads-crm/leads/:id/notes) —
+// historique append-only, owner uniquement.
+router.get('/soumission-calfeutrage/:id/notes', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const lead = get('SELECT id FROM soumission_calfeutrage_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const rows = query(
+    `SELECT n.*, u.first_name || ' ' || u.last_name AS author_name
+     FROM soumission_calfeutrage_notes n
+     LEFT JOIN users u ON n.author_id = u.id
+     WHERE n.lead_id = ?
+     ORDER BY n.created_at DESC, n.rowid DESC`,
+    [id]
+  );
+  return res.json(rows);
+});
+
+router.post('/soumission-calfeutrage/:id/notes', requireAuth, requireOwner, (req, res) => {
+  const { id } = req.params;
+  const { body } = req.body || {};
+  if (!body || !String(body).trim()) return res.status(400).json({ error: 'body required.' });
+  const lead = get('SELECT id FROM soumission_calfeutrage_leads WHERE id = ?', [id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const noteId = uuid();
+  run(
+    `INSERT INTO soumission_calfeutrage_notes (id, lead_id, author_id, body) VALUES (?, ?, ?, ?)`,
+    [noteId, id, req.user.id, String(body).trim()]
+  );
+  return res.status(201).json({ message: 'Note added.', id: noteId });
+});
+
 // === App d'inspection (Ouvertures/Calfeutrage) — envoi du rapport d'inspection par courriel au client ===
 // Ajout additif uniquement : ne modifie aucune route existante.
 router.post('/deals/:id/send-report', requireAuth, (req, res) => {
