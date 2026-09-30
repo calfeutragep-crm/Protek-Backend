@@ -8,7 +8,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'protek-dev-secret-change-in-produc
 // demande utilisateur "admins doivent rester connectes en tout temps"). Les autres roles gardent
 // une session plus courte.
 function tokenExpiryFor(user) {
-  return user.role === 'owner' ? '90d' : '8h';
+  return (user.role === 'owner' || user.role === 'admin_closer') ? '90d' : '8h';
 }
 
 function signToken(user) {
@@ -39,6 +39,11 @@ function requireAuth(req, res, next) {
     );
     if (!user) return res.status(401).json({ error: 'User not found.' });
     if (user.status !== 'active') return res.status(403).json({ error: 'Account not active.' });
+    // admin_closer (Mathis) = owner pour TOUS les controles d'acces : on normalise ici une seule
+    // fois plutot que de toucher les ~60 verifications role === 'owner' du backend. real_role
+    // garde le vrai role pour ce qui en a besoin (calendrier closer, booking Queue).
+    user.real_role = user.role;
+    if (user.role === 'admin_closer') user.role = 'owner';
     req.user = user;
     next();
   } catch (e) {
