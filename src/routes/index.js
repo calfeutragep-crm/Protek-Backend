@@ -1060,18 +1060,19 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 // complete sur les deux CRM) — tous via notifyRole (in-app + push, voir utils/notify.js).
 function insertAdLead({
   source, firstName, lastName, phone, email, notes, createdBy, ghlContactId,
-  city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource,
+  city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource, address, postalCode,
 }) {
   const id = uuid();
   run(
     `INSERT INTO ad_leads (
        id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id,
        city, building_type, calfeutrage_condition, zones_to_seal, project_details, form_source,
-       qualification_exempt
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       qualification_exempt, address, postal_code
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     [
       id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null,
       city || null, buildingType || null, calfeutrageCondition || null, zonesToSeal || null, projectDetails || null, formSource || null,
+      address || null, postalCode || null,
     ]
   );
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
@@ -1085,11 +1086,11 @@ function insertAdLead({
 }
 
 router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
-  const { source, firstName, lastName, phone, email, notes } = req.body;
+  const { source, firstName, lastName, phone, email, notes, address, postalCode, city } = req.body;
   if (!firstName || !lastName || !phone) {
     return res.status(400).json({ error: 'firstName, lastName, phone required.' });
   }
-  const id = insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy: req.user.id });
+  const id = insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy: req.user.id, city, address, postalCode });
   return res.status(201).json({ message: 'Lead created.', id });
 });
 
@@ -1373,7 +1374,7 @@ function adLeadClosedLostSatisfied(lead, body) {
 
 router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) => {
   const { id } = req.params;
-  const { status, claim, apptDate, apptHour, notes, quoteImageUrls, closedLostReason } = req.body;
+  const { status, claim, apptDate, apptHour, notes, quoteImageUrls, closedLostReason, address, postalCode, city } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
@@ -1398,6 +1399,10 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
   if (apptDate !== undefined) { sets.push('appt_date = ?'); params.push(apptDate || null); }
   if (apptHour !== undefined) { sets.push('appt_hour = ?'); params.push(apptHour != null ? parseFloat(apptHour) : null); }
   if (notes !== undefined) { sets.push('notes = ?'); params.push(notes || null); }
+  // Adresse du client (demande 2026-09-30) — editable en tout temps depuis la fiche Queue.
+  if (address !== undefined) { sets.push('address = ?'); params.push(address ? String(address).trim() : null); }
+  if (postalCode !== undefined) { sets.push('postal_code = ?'); params.push(postalCode ? String(postalCode).trim() : null); }
+  if (city !== undefined) { sets.push('city = ?'); params.push(city ? String(city).trim() : null); }
   if (closedLostReason !== undefined) { sets.push('closed_lost_reason = ?'); params.push(closedLostReason || null); }
   // Image(s) de soumission/quote (etape "Left Quote") — le front envoie toujours le tableau
   // complet (existant + nouvelles URLs Cloudinary), meme convention que deals.photo_urls : on
@@ -1420,6 +1425,17 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
 
   params.push(id);
   run(`UPDATE ad_leads SET ${sets.join(', ')} WHERE id = ?`, params);
+
+  // RDV deja booke : l'adresse modifiee est repoussee sur la fiche du RDV (table leads) pour que
+  // le closer voie toujours la bonne adresse dans son horaire, sans re-booker.
+  if (lead.lead_id && (address !== undefined || postalCode !== undefined || city !== undefined)) {
+    const ls = [], lp = [];
+    if (address !== undefined) { ls.push('address = ?'); lp.push(address ? String(address).trim() : ''); }
+    if (postalCode !== undefined) { ls.push('postal = ?'); lp.push(postalCode ? String(postalCode).trim() : null); }
+    if (city !== undefined) { ls.push('city = ?'); lp.push(city ? String(city).trim() : null); }
+    lp.push(lead.lead_id);
+    run(`UPDATE leads SET ${ls.join(', ')} WHERE id = ?`, lp);
+  }
 
   const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
   // RDV pris sur un lead marketing — l'owner veut le savoir, comme cote porte-a-porte (voir
@@ -1536,13 +1552,16 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   const closer = get(
     `SELECT u.id, u.first_name, u.last_name FROM users u
      JOIN roles r ON u.role_id = r.id
-     WHERE u.id = ? AND r.name IN ('closer', 'team_leader_vente') AND u.status = 'active'`,
+     WHERE u.id = ? AND r.name IN ('closer', 'team_leader_vente', 'admin_closer') AND u.status = 'active'`,
     [closerId]
   );
-  if (!closer) return res.status(400).json({ error: 'closerId invalide (doit être un closer ou team leader vente actif).' });
+  if (!closer) return res.status(400).json({ error: 'closerId invalide (doit être un closer, team leader vente ou admin closer actif).' });
   if (!apptDate) return res.status(400).json({ error: 'apptDate requis.' });
   const finalCity = city || lead.city;
   if (!finalCity) return res.status(400).json({ error: 'city requis.' });
+  // Adresse saisie dans la fiche Queue reprise par defaut (demande 2026-09-30).
+  const finalAddress = address || lead.address || null;
+  const finalPostal = postal || lead.postal_code || null;
   const hour = parseFloat(apptHour);
   const finalHour = isNaN(hour) ? 14 : hour;
 
@@ -1555,7 +1574,7 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   run(
     `INSERT INTO leads (id, first_name, last_name, phone, email, address, city, postal, notes, setter_id, closer_id, status)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')`,
-    [leadId, lead.first_name || '', lead.last_name || '', lead.phone, lead.email, address || null, finalCity, postal || null,
+    [leadId, lead.first_name || '', lead.last_name || '', lead.phone, lead.email, finalAddress, finalCity, finalPostal,
      `${LABEL_LEADS} ${lead.notes || ''}`.trim(), null, closerId]
   );
   const apptId = uuid();
@@ -1571,9 +1590,10 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   run(
     `UPDATE ad_leads SET
        status = ?, closer_id = ?, appt_date = ?, appt_hour = ?, lead_id = ?, appointment_id = ?,
+       address = ?, postal_code = ?, city = ?,
        contacted_at = COALESCE(contacted_at, ?), updated_at = datetime('now')
      WHERE id = ?`,
-    [nextStatus, closerId, apptDate, finalHour, leadId, apptId, new Date().toISOString(), id]
+    [nextStatus, closerId, apptDate, finalHour, leadId, apptId, finalAddress, finalPostal, finalCity, new Date().toISOString(), id]
   );
 
   const closerName = `${closer.first_name} ${closer.last_name}`;
@@ -2299,6 +2319,9 @@ router.post('/referencement/leads/:id/book', requireAuth, requireReferencementAc
   if (!apptDate) return res.status(400).json({ error: 'apptDate requis.' });
   const finalCity = city || lead.city;
   if (!finalCity) return res.status(400).json({ error: 'city requis.' });
+  // Adresse saisie dans la fiche Queue reprise par defaut (demande 2026-09-30).
+  const finalAddress = address || lead.address || null;
+  const finalPostal = postal || lead.postal_code || null;
   const hour = parseFloat(apptHour);
   const finalHour = isNaN(hour) ? 14 : hour;
 
