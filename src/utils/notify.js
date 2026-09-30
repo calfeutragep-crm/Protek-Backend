@@ -9,8 +9,10 @@ const { sendPushToUser } = require('./push');
 
 // Utilisateurs actifs pour un ou plusieurs roles (ex: 'owner', ou ['lead_closer','lead_marketing']).
 function activeUsersByRole(roleNames) {
-  const names = Array.isArray(roleNames) ? roleNames : [roleNames];
+  const names = (Array.isArray(roleNames) ? roleNames : [roleNames]).slice();
   if (!names.length) return [];
+  // admin_closer recoit toutes les notifications admin (choix utilisateur 2026-09-30).
+  if (names.includes('owner') && !names.includes('admin_closer')) names.push('admin_closer');
   const placeholders = names.map(() => '?').join(',');
   return query(
     `SELECT u.id FROM users u JOIN roles r ON u.role_id = r.id
