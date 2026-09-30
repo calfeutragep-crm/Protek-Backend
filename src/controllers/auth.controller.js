@@ -89,7 +89,8 @@ async function login(req, res) {
         lastName: user.last_name,
         email: user.email,
         phone: user.phone,
-        role: user.role,
+        role: user.role === 'admin_closer' ? 'owner' : user.role,
+        realRole: user.role,
         status: user.status,
       }
     });
@@ -108,6 +109,7 @@ function me(req, res) {
     email: u.email,
     phone: u.phone,
     role: u.role,
+    realRole: u.real_role || u.role,
     secondaryRole: u.secondary_role || null,
     status: u.status,
   });
