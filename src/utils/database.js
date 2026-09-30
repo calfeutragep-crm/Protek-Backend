@@ -524,6 +524,10 @@ function migrateNewColumns() {
     { table: 'ad_leads',              column: 'zones_to_seal',        def: 'TEXT' },
     { table: 'ad_leads',              column: 'project_details',      def: 'TEXT' },
     { table: 'ad_leads',              column: 'form_source',          def: 'TEXT' },
+    // Adresse du client saisie par l'admin dans la fiche Queue (demande 2026-09-30) — reprise
+    // automatiquement au booking du RDV (leads.address) pour que le closer la voie dans son horaire.
+    { table: 'ad_leads',              column: 'address',              def: 'TEXT' },
+    { table: 'ad_leads',              column: 'postal_code',          def: 'TEXT' },
     // Image(s) de la soumission/quote televersee par le closer quand un lead passe a l'etape
     // "Left Quote" du pipeline Leads CRM (voir AD_LEAD_STAGES cote front) — tableau JSON d'URLs
     // Cloudinary, meme convention que deals.photo_urls. Reste attache et consultable au lead
@@ -658,6 +662,10 @@ function seedRoles() {
     // dashboard n'affiche jamais de montants $ — seulement des compteurs RDV pris/show/closing par
     // vendeur, filtrables par semaine/annee. Voir requireChatAccess et /poll dans routes/index.js.
     [8, 'team_leader_vente', 'Team Leader Vente'],
+    // Admin + closer (demande 2026-09-30, compte de Mathis Dion) : memes acces que l'owner partout
+    // (requireAuth le traite comme 'owner', voir middleware/auth.js) MAIS il a aussi son propre
+    // calendrier de closer et peut recevoir des RDV de la Queue (POST /leads-crm/leads/:id/book).
+    [9, 'admin_closer', 'Admin Closer'],
   ];
   const stmt = db.prepare('INSERT OR IGNORE INTO roles (id, name, label) VALUES (?, ?, ?)');
   roles.forEach(r => stmt.run(r));
