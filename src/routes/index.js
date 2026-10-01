@@ -2723,4 +2723,32 @@ router.delete('/other-services/leads/:id', requireAuth, requireOwner, (req, res)
   return res.json({ message: 'Lead supprimé.' });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// DEPENSES PUB (Queue > Performance) — demande utilisateur 2026-10-01 : "a section inside of queue
+// to track ad spend vs what has closed and for how much (per week and per month)". Saisie manuelle,
+// admin uniquement (meme garde que la Queue). Les calculs (ventes, revenu, ROAS, taux de closing
+// par closer) sont faits cote site a partir des leads Queue + deals deja charges.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+const AD_SPEND_PLATFORMS = ['Facebook', 'Instagram', 'Google Ads', 'TikTok', 'Autre'];
+router.get('/leads-crm/ad-spend', requireAuth, requireQueueOwner, (req, res) => {
+  return res.json(query('SELECT * FROM ad_spend ORDER BY spend_date DESC, created_at DESC'));
+});
+router.post('/leads-crm/ad-spend', requireAuth, requireQueueOwner, (req, res) => {
+  const { spendDate, amount, platform, notes } = req.body;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(spendDate || ''))) return res.status(400).json({ error: 'Date invalide (AAAA-MM-JJ).' });
+  const amt = parseFloat(amount);
+  if (!isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'Montant invalide.' });
+  const plat = AD_SPEND_PLATFORMS.includes(platform) ? platform : 'Autre';
+  const id = uuid();
+  run('INSERT INTO ad_spend (id, spend_date, amount, platform, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+    [id, spendDate, Math.round(amt * 100) / 100, plat, notes ? String(notes).trim() || null : null, req.user.id]);
+  return res.status(201).json({ message: 'Dépense ajoutée.', id });
+});
+router.delete('/leads-crm/ad-spend/:id', requireAuth, requireQueueOwner, (req, res) => {
+  const row = get('SELECT id FROM ad_spend WHERE id = ?', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Dépense introuvable.' });
+  run('DELETE FROM ad_spend WHERE id = ?', [req.params.id]);
+  return res.json({ message: 'Dépense supprimée.' });
+});
+
 module.exports = router;
