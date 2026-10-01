@@ -480,6 +480,19 @@ function createSchema() {
       updated_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY(created_by) REFERENCES users(id)
     );
+    -- Depenses publicitaires (demande utilisateur 2026-10-01 : suivre la pub vs ce qui a ete
+    -- ferme, par semaine et par mois, dans la Queue). Saisie manuelle par l'admin (aucune
+    -- plateforme pub connectee) : une ligne = un montant depense a une date, sur une plateforme.
+    CREATE TABLE IF NOT EXISTS ad_spend (
+      id TEXT PRIMARY KEY,
+      spend_date TEXT NOT NULL,
+      amount REAL NOT NULL,
+      platform TEXT,
+      notes TEXT,
+      created_by TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(created_by) REFERENCES users(id)
+    );
   `);
   saveDb();
 }
