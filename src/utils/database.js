@@ -458,6 +458,28 @@ function createSchema() {
       FOREIGN KEY(lead_id) REFERENCES soumission_calfeutrage_leads(id),
       FOREIGN KEY(author_id) REFERENCES users(id)
     );
+    -- "Autres services" (demande utilisateur 2026-09-30) : leads pour d'AUTRES services que le
+    -- calfeutrage (changement de thermos, isolation d'entretoit, portes et fenetres, toiture,
+    -- fissures de fondation, peinture, revetement), entres par les setters/closers sur le
+    -- terrain. Table isolee — PAS encore reliee au CRM Thermos Horizon (choix explicite de
+    -- l'utilisateur : "ne pas connecter les 2 CRM tout de suite").
+    CREATE TABLE IF NOT EXISTS other_service_leads (
+      id TEXT PRIMARY KEY,
+      service TEXT NOT NULL,
+      first_name TEXT,
+      last_name TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      city TEXT,
+      postal_code TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'Nouveau',
+      created_by TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(created_by) REFERENCES users(id)
+    );
   `);
   saveDb();
 }
