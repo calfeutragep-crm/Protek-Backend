@@ -2652,4 +2652,75 @@ router.post('/deals/:id/send-report', requireAuth, (req, res) => {
   return res.json({ message: 'Rapport envoyé.', pdfUrl });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// AUTRES SERVICES — demande utilisateur 2026-09-30 : "donner une option aux setters et closers
+// d'entrer un lead [...] une section AUTRES SERVICES ou les setters et closers peuvent entrer les
+// leads pour d'autres services". Simple saisie + suivi, isole : rien n'est envoye au CRM Thermos
+// Horizon pour l'instant ("ne pas connecter les 2 CRM tout de suite").
+//  - POST : setter / closer / team_leader_vente / owner (et admin_closer, vu comme owner).
+//  - GET  : owner voit tout ; les autres ne voient que les leads qu'ils ont eux-memes entres.
+//  - PATCH (statut) / DELETE : owner uniquement.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+const OTHER_SERVICES = [
+  'Isolation entretoit', 'Changement de vitres thermos', 'Changement de portes et fenêtres', 'Toiture',
+  'Fissures de fondation', 'Peinture intérieure', 'Peinture extérieure', 'Revêtement',
+];
+const OTHER_SERVICE_STATUSES = ['Nouveau', 'Transmis', 'Fermé', 'Perdu'];
+const LABEL_OS = '[Autres services]';
+function requireOtherServicesAccess(req, res, next) {
+  const r = req.user.role;
+  if (!['owner', 'setter', 'closer', 'team_leader_vente'].includes(r)) {
+    return res.status(403).json({ error: 'Accès réservé aux setters, closers et admins.' });
+  }
+  next();
+}
+
+router.get('/other-services/leads', requireAuth, requireOtherServicesAccess, (req, res) => {
+  const base = `SELECT o.*, u.first_name || ' ' || u.last_name AS created_by_name
+                FROM other_service_leads o LEFT JOIN users u ON o.created_by = u.id`;
+  const rows = req.user.role === 'owner'
+    ? query(`${base} ORDER BY o.created_at DESC`)
+    : query(`${base} WHERE o.created_by = ? ORDER BY o.created_at DESC`, [req.user.id]);
+  return res.json(rows);
+});
+
+router.post('/other-services/leads', requireAuth, requireOtherServicesAccess, (req, res) => {
+  const { service, firstName, lastName, phone, email, address, city, postalCode, notes } = req.body;
+  if (!OTHER_SERVICES.includes(service)) return res.status(400).json({ error: 'Service invalide.' });
+  if (!firstName || !phone) return res.status(400).json({ error: 'Prénom et téléphone requis.' });
+  const clean = v => (v == null ? null : (String(v).trim() || null));
+  const id = uuid();
+  run(`INSERT INTO other_service_leads (id, service, first_name, last_name, phone, email, address, city, postal_code, notes, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Nouveau', ?)`,
+    [id, service, clean(firstName), clean(lastName), clean(phone), clean(email), clean(address), clean(city), clean(postalCode), clean(notes), req.user.id]);
+  const who = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim();
+  const nm = `${clean(firstName) || ''} ${clean(lastName) || ''}`.trim();
+  notifyRole('owner', `🧰 ${LABEL_OS} ${service}: ${nm} — ${clean(phone)} (par ${who})`,
+    { title: `🧰 Nouveau lead ${LABEL_OS}`, body: `${service} — ${nm}`, url: '/' }, req.user.id);
+  return res.status(201).json({ message: 'Lead ajouté.', id });
+});
+
+router.patch('/other-services/leads/:id', requireAuth, requireOwner, (req, res) => {
+  const lead = get('SELECT id FROM other_service_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  const { status, notes } = req.body;
+  const sets = [], params = [];
+  if (status !== undefined) {
+    if (!OTHER_SERVICE_STATUSES.includes(status)) return res.status(400).json({ error: 'Statut invalide.' });
+    sets.push('status = ?'); params.push(status);
+  }
+  if (notes !== undefined) { sets.push('notes = ?'); params.push(notes ? String(notes) : null); }
+  if (!sets.length) return res.json({ message: 'Rien à modifier.' });
+  sets.push("updated_at = datetime('now')"); params.push(req.params.id);
+  run(`UPDATE other_service_leads SET ${sets.join(', ')} WHERE id = ?`, params);
+  return res.json({ message: 'Lead mis à jour.' });
+});
+
+router.delete('/other-services/leads/:id', requireAuth, requireOwner, (req, res) => {
+  const lead = get('SELECT id FROM other_service_leads WHERE id = ?', [req.params.id]);
+  if (!lead) return res.status(404).json({ error: 'Lead introuvable.' });
+  run('DELETE FROM other_service_leads WHERE id = ?', [req.params.id]);
+  return res.json({ message: 'Lead supprimé.' });
+});
+
 module.exports = router;
