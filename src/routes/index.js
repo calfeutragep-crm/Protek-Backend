@@ -515,6 +515,20 @@ function apptStatusLockSatisfied(appt, status, body) {
   }
 }
 
+// Equivalences de statuts entre un RDV (calendrier du closer) et le lead marketing lie (Queue),
+// pour la synchronisation automatique dans les 2 sens (demande utilisateur 2026-09-30). Un statut
+// absent de la table ne change rien de l'autre cote (ex: "Left Quote" n'a pas d'equivalent RDV).
+const APPT_TO_AD_LEAD_STATUS = {
+  'Scheduled': 'Appointment Set', 'Confirmed': 'Appointment Set', 'Rescheduled': 'Appointment Set', 'Callback': 'Appointment Set',
+  'No Answer': 'No Show', 'Not Home': 'No Show',
+  'Cancelled': 'Contacted',
+  'Closed Won': 'Closed Won', 'Closed Lost': 'Closed Lost',
+};
+const AD_LEAD_TO_APPT_STATUS = {
+  'Appointment Set': 'Scheduled', 'No Show': 'Not Home', 'Not Qualified': 'Cancelled',
+  'Closed Won': 'Closed Won', 'Closed Lost': 'Closed Lost',
+};
+
 router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
   const {
@@ -591,6 +605,28 @@ const sets = [];
   // fourni (voir plus bas) — ce bloc-ci couvre en plus le cas ou le statut est change ICI, sur le
   // RDV directement (bouton statut de la fiche RDV), qui est le chemin le plus frequent pour
   // "Closed Lost" (aucun deal n'est jamais cree pour un RDV perdu).
+  // Sync automatique RDV -> Queue (demande utilisateur 2026-09-30 : "quand je mets un rendez-vous
+  // ou je change le statut d'un lead, tout doit se faire automatiquement des 2 cotes"). En plus du
+  // bloc Closed Won/Lost ci-dessous (notification owner), on repousse sur le lead marketing lie :
+  // les autres statuts (equivalence ci-dessous), la date/heure reprogrammee et l'adresse.
+  {
+    const linked = get('SELECT * FROM ad_leads WHERE appointment_id = ?', [id]);
+    if (linked) {
+      const alSets = [], alParams = [];
+      const mapped = status !== undefined && status !== appt.status ? APPT_TO_AD_LEAD_STATUS[status] : undefined;
+      if (mapped && mapped !== linked.status) { alSets.push('status = ?'); alParams.push(mapped); }
+      if (apptDate !== undefined) { alSets.push('appt_date = ?'); alParams.push(apptDate || null); }
+      if (apptHour !== undefined) { alSets.push('appt_hour = ?'); alParams.push(apptHour != null ? parseFloat(apptHour) : null); }
+      if (address !== undefined) { alSets.push('address = ?'); alParams.push(address || null); }
+      if (city !== undefined) { alSets.push('city = ?'); alParams.push(city || null); }
+      if (postal !== undefined) { alSets.push('postal_code = ?'); alParams.push(postal || null); }
+      if (alSets.length) {
+        alSets.push("updated_at = datetime('now')");
+        alParams.push(linked.id);
+        run(`UPDATE ad_leads SET ${alSets.join(', ')} WHERE id = ?`, alParams);
+      }
+    }
+  }
   if (status === 'Closed Won' || status === 'Closed Lost') {
     const linkedAdLead = get('SELECT id, first_name, last_name, ghl_contact_id FROM ad_leads WHERE appointment_id = ?', [id]);
     if (linkedAdLead) {
@@ -1437,6 +1473,28 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
     run(`UPDATE leads SET ${ls.join(', ')} WHERE id = ?`, lp);
   }
 
+  // Sync automatique Queue -> RDV du closer (demande utilisateur 2026-09-30) : un changement de
+  // statut fait dans la Queue se repercute sur le RDV lie dans le calendrier du closer (voir
+  // AD_LEAD_TO_APPT_STATUS). Ecriture directe en base (pas via PATCH /appointments) : pas de
+  // boucle de synchronisation, et l'owner n'est pas soumis aux verrous photo/raison du closer.
+  if (status && status !== lead.status && lead.appointment_id) {
+    const apptStatus = AD_LEAD_TO_APPT_STATUS[status];
+    const linkedAppt = apptStatus ? get('SELECT id, status, closer_id, lead_id FROM appointments WHERE id = ?', [lead.appointment_id]) : null;
+    if (linkedAppt && linkedAppt.status !== apptStatus) {
+      const extra = (status === 'Closed Lost' && closedLostReason) ? ', closed_lost_reason = ?' : '';
+      const ap = [apptStatus]; if (extra) ap.push(closedLostReason); ap.push(linkedAppt.id);
+      run(`UPDATE appointments SET status = ?${extra}, updated_at = datetime('now') WHERE id = ?`, ap);
+      if (linkedAppt.lead_id && (apptStatus === 'Closed Won' || apptStatus === 'Closed Lost')) {
+        run("UPDATE leads SET status = ?, updated_at = datetime('now') WHERE id = ?", [apptStatus, linkedAppt.lead_id]);
+      }
+      if (linkedAppt.closer_id && linkedAppt.closer_id !== req.user.id) {
+        const nm = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
+        notifyUser(linkedAppt.closer_id, `📊 ${LABEL_LEADS} RDV mis à jour — ${nm}: ${apptStatus}`,
+          { title: `📊 RDV mis à jour ${LABEL_LEADS}`, body: `${nm}: ${apptStatus}`, url: '/' });
+      }
+    }
+  }
+
   const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
   // RDV pris sur un lead marketing — l'owner veut le savoir, comme cote porte-a-porte (voir
   // POST /leads). Le closer qui vient de le prendre le sait deja (c'est son action), pas besoin
@@ -1570,6 +1628,30 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   }
 
   const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
+  // Reprogrammer (lead deja booke, RDV toujours existant) : on DEPLACE le RDV existant (closer,
+  // date, heure, adresse) au lieu d'en creer un deuxieme — avant, "Reprogrammer" laissait l'ancien
+  // RDV en double dans le calendrier du closer. Demande utilisateur 2026-09-30 (sync des 2 cotes).
+  const existingAppt = lead.appointment_id ? get('SELECT * FROM appointments WHERE id = ?', [lead.appointment_id]) : null;
+  if (existingAppt) {
+    const prevCloser = existingAppt.closer_id;
+    run(`UPDATE appointments SET closer_id = ?, appt_date = ?, appt_hour = ?, status = 'Rescheduled', updated_at = datetime('now') WHERE id = ?`,
+      [closerId, apptDate, finalHour, existingAppt.id]);
+    if (existingAppt.lead_id) {
+      run(`UPDATE leads SET closer_id = ?, address = COALESCE(?, address), city = ?, postal = COALESCE(?, postal), updated_at = datetime('now') WHERE id = ?`,
+        [closerId, finalAddress, finalCity, finalPostal, existingAppt.lead_id]);
+    }
+    const TERMINAL_RESCHED = ['Closed Won', 'Closed Lost', 'Not Qualified'];
+    const reschedStatus = TERMINAL_RESCHED.includes(lead.status) ? lead.status : 'Appointment Set';
+    run(`UPDATE ad_leads SET status = ?, closer_id = ?, appt_date = ?, appt_hour = ?, address = ?, postal_code = ?, city = ?, updated_at = datetime('now') WHERE id = ?`,
+      [reschedStatus, closerId, apptDate, finalHour, finalAddress, finalPostal, finalCity, id]);
+    notifyUser(closerId, `📅 ${LABEL_LEADS} RDV reprogrammé: ${leadName} le ${apptDate}`,
+      { title: `📅 RDV reprogrammé ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
+    if (prevCloser && prevCloser !== closerId) {
+      notifyUser(prevCloser, `🔁 ${LABEL_LEADS} RDV retiré de ton horaire (réassigné): ${leadName}`,
+        { title: `🔁 RDV réassigné ${LABEL_LEADS}`, body: leadName, url: '/' });
+    }
+    return res.status(200).json({ message: 'Rendez-vous reprogrammé.', leadId: existingAppt.lead_id, appointmentId: existingAppt.id });
+  }
   const leadId = uuid();
   run(
     `INSERT INTO leads (id, first_name, last_name, phone, email, address, city, postal, notes, setter_id, closer_id, status)
@@ -2083,6 +2165,17 @@ router.get('/poll', requireAuth, (req, res) => {
   if (role === 'owner' || role === 'setter' || role === 'closer' || role === 'team_leader_vente') {
     leaderboard = computeLeaderboard();
   }
+  // Signature des RDV/fiches/blocages (demande utilisateur 2026-09-30 : tout doit se mettre a
+  // jour automatiquement des 2 cotes). Le frontend recharge ses RDV des que cette signature
+  // change — couvre creations, modifications ET suppressions (le COUNT change), sans renvoyer
+  // toutes les lignes a chaque poll.
+  let apptSig = null;
+  if (role === 'owner' || role === 'setter' || role === 'closer' || role === 'team_leader_vente') {
+    const a = get(`SELECT COUNT(*) AS n, MAX(updated_at) AS u, MAX(created_at) AS c FROM appointments`) || {};
+    const l = get(`SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM leads`) || {};
+    const b = get(`SELECT COUNT(*) AS n, MAX(created_at) AS c FROM closer_blackouts`) || {};
+    apptSig = [a.n, a.u, a.c, l.n, l.u, b.n, b.c].join('|');
+  }
   let newAdLeads = [];
   let newAdLeadCostRequests = [];
   if (role === 'owner' || role === 'lead_marketing' || role === 'lead_closer') {
@@ -2117,6 +2210,7 @@ router.get('/poll', requireAuth, (req, res) => {
     leaderboard,
     newAdLeads,
     newAdLeadCostRequests,
+    apptSig,
     unreadNotifications: unreadCount ? unreadCount.c : 0,
     serverTime: new Date().toISOString(),
   });
