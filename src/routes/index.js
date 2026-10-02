@@ -38,6 +38,7 @@ const { sendSms } = require('../utils/sms');
 const { sendEmail } = require('../utils/email');
 const { buildClosedWonMessage } = require('../utils/dealClosedMessage');
 const { buildNewLeadSms } = require('../utils/newLeadSms');
+const { buildAppointmentSetMessage } = require('../utils/appointmentSetMessage');
 const { moveOpportunityToConfirmation, markOpportunityWon } = require('../utils/ghlClient');
 
 // Etiquettes utilisees dans TOUS les messages de notification pour que chacun sache d'un coup
@@ -1378,6 +1379,30 @@ router.post('/after-sales/:id/assign', requireAuth, requireManagerOrOwner, (req,
 });
 
 
+// Automatisation "Appointment Set" (demande utilisateur 2026-10-02) : des qu'un lead du Leads
+// CRM passe a "Appointment Set" (bouton de statut -> POST .../book, kanban ou date de RDV fixee
+// -> PATCH), le client recoit par SMS ET par courriel un message qui confirme le rendez-vous et
+// presente l'entreprise (facon de travailler, licence RBQ, permis OPC, site web — texte dans
+// utils/appointmentSetMessage.js). Envoye UNE seule fois par lead (ad_leads.intro_sent_at) pour
+// ne jamais re-texter un client rebooke/reprogramme. Fire-and-forget comme le message closed-won :
+// un souci Twilio/Resend ne doit jamais faire echouer la prise de rendez-vous.
+function sendAppointmentSetIntro(adLeadId, { closerFirstName } = {}) {
+  try {
+    const l = get('SELECT * FROM ad_leads WHERE id = ?', [adLeadId]);
+    if (!l || l.intro_sent_at) return;
+    if (!l.phone && !l.email) return;
+    const msg = buildAppointmentSetMessage({
+      firstName: l.first_name, apptDate: l.appt_date, apptHour: l.appt_hour, closerFirstName,
+    });
+    run('UPDATE ad_leads SET intro_sent_at = ? WHERE id = ?', [new Date().toISOString(), adLeadId]);
+    if (l.phone) sendSms({ to: l.phone, body: msg.sms });
+    if (l.email) sendEmail({ to: l.email, subject: msg.subject, text: msg.email });
+    console.log(`[appointment-set] message de presentation envoye au lead ${adLeadId} (sms: ${!!l.phone}, courriel: ${!!l.email})`);
+  } catch (e) {
+    console.error('[appointment-set] envoi du message de presentation echoue:', e.message);
+  }
+}
+
 // Verrou de qualification : un lead_closer ne peut pas deplacer un lead NON exempt (voir
 // qualification_exempt, migration database.js) vers un autre statut tant que la fiche de
 // qualification n'est pas complete (qualification_completed_at NULL). L'owner peut toujours
@@ -1494,6 +1519,13 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
       }
     }
   }
+
+  // Le lead vient de passer a "Appointment Set" par ce PATCH (statut explicite, ou date de RDV
+  // fixee — voir progression automatique plus haut) : message de presentation au client.
+  const becameApptSet = lead.status !== 'Appointment Set' && (
+    status === 'Appointment Set' || (!status && apptDate && !TERMINAL_STATUSES.includes(lead.status))
+  );
+  if (becameApptSet) sendAppointmentSetIntro(id);
 
   const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Client';
   // RDV pris sur un lead marketing — l'owner veut le savoir, comme cote porte-a-porte (voir
@@ -1684,6 +1716,8 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   notifyRole('owner', `📅 ${LABEL_LEADS} RDV booké pour ${closerName}: ${leadName} le ${apptDate}`,
     { title: `📅 RDV booké ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
   if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
+  // Message de presentation au client (SMS + courriel) — voir sendAppointmentSetIntro.
+  if (nextStatus === 'Appointment Set') sendAppointmentSetIntro(id, { closerFirstName: closer.first_name });
 
   return res.status(201).json({ message: 'Rendez-vous booké.', leadId, appointmentId: apptId });
 });
