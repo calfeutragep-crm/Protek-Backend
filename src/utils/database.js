@@ -641,6 +641,10 @@ function migrateNewColumns() {
   { table: 'appointments', column: 'reschedule_reason', def: 'TEXT' },
   { table: 'appointments', column: 'closed_lost_reason', def: 'TEXT' },
   { table: 'ad_leads', column: 'closed_lost_reason', def: 'TEXT' },
+  // Automatisation "Appointment Set" (2026-10-02) : horodatage de l'envoi du message de
+  // presentation (SMS + courriel, voir utils/appointmentSetMessage.js). Sert de garde anti-doublon :
+  // un lead ne recoit ce message qu'UNE fois, meme s'il est rebooke ou repasse par ce statut.
+  { table: 'ad_leads', column: 'intro_sent_at', def: 'TEXT' },
   // Mini-app "Soumission Calfeutrage" (2026-09-29, suite) : iOS ignore completement les champs
   // icon/badge du payload push et affiche TOUJOURS l'icone de l'app installee sur l'ecran
   // d'accueil — impossible de differencier le logo par notification au sein d'UNE SEULE app.
