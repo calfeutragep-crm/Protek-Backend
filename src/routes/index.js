@@ -1097,21 +1097,30 @@ router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) =>
 // complete sur les deux CRM) — tous via notifyRole (in-app + push, voir utils/notify.js).
 function insertAdLead({
   source, firstName, lastName, phone, email, notes, createdBy, ghlContactId,
-  city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource, address, postalCode,
+  city, buildingType, calfeutrageCondition, zonesToSeal, projectDetails, formSource, address, postalCode, brand,
 }) {
   const id = uuid();
+  const isThermos = brand === 'thermos';
   run(
     `INSERT INTO ad_leads (
        id, source, first_name, last_name, phone, email, notes, status, created_by, ghl_contact_id,
        city, building_type, calfeutrage_condition, zones_to_seal, project_details, form_source,
-       qualification_exempt, address, postal_code
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       qualification_exempt, address, postal_code, brand
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     [
       id, source || 'Autre', firstName, lastName, phone, email || null, notes || null, createdBy || null, ghlContactId || null,
       city || null, buildingType || null, calfeutrageCondition || null, zonesToSeal || null, projectDetails || null, formSource || null,
-      address || null, postalCode || null,
+      address || null, postalCode || null, isThermos ? 'thermos' : 'protek',
     ]
   );
+  if (isThermos) {
+    // Lead Thermos Horizon : onglet "Thermos" de la Queue (admin). Pas de SMS automatique — le
+    // texte de buildNewLeadSms() est au nom de Calfeutrage Protek.
+    notifyRole(['owner'],
+      `🪟 [Thermos] Nouveau lead (${source || 'Thermos Horizon'}): ${firstName} ${lastName} — ${phone}`,
+      { title: '🪟 Nouveau lead Thermos Horizon', body: `${firstName} ${lastName} — ${phone}`, url: '/' });
+    return id;
+  }
   notifyRole(['lead_closer', 'lead_marketing', 'owner'],
     `🆕 ${LABEL_LEADS} Nouveau lead (${source || 'Autre'}): ${firstName} ${lastName} — ${phone}`,
     { title: `🆕 Nouveau lead ${LABEL_LEADS}`, body: `${firstName} ${lastName} — ${phone}`, url: '/' });
@@ -1123,11 +1132,11 @@ function insertAdLead({
 }
 
 router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
-  const { source, firstName, lastName, phone, email, notes, address, postalCode, city } = req.body;
+  const { source, firstName, lastName, phone, email, notes, address, postalCode, city, brand } = req.body;
   if (!firstName || !lastName || !phone) {
     return res.status(400).json({ error: 'firstName, lastName, phone required.' });
   }
-  const id = insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy: req.user.id, city, address, postalCode });
+  const id = insertAdLead({ source, firstName, lastName, phone, email, notes, createdBy: req.user.id, city, address, postalCode, brand });
   return res.status(201).json({ message: 'Lead created.', id });
 });
 
@@ -1219,6 +1228,75 @@ router.post('/webhooks/ad-leads', webhookLimiter, (req, res) => {
     return res.status(201).json({ message: 'Lead created.', id });
   } catch (e) {
     console.error('webhook ad-leads error', e);
+    return res.status(500).json({ error: 'Insertion echouee.' });
+  }
+});
+
+// POST /webhooks/thermos-leads — leads du site thermoshorizon.com (Thermos Horizon, sous-division
+// de Groupe Protek — demande utilisateur 2026-10-10). Appele cote serveur par la fonction
+// submitLead du site (Lovable, src/lib/leads.functions.ts), en plus de son envoi existant au CRM
+// Thermos. Le lead entre dans ad_leads avec brand='thermos' -> onglet "Thermos" de la Queue.
+// Cle partagee OPTIONNELLE : si THERMOS_WEBHOOK_SECRET est defini sur Railway, elle est exigee
+// (?key=... ou header x-webhook-secret) ; sinon l'endpoint reste ouvert, protege par le
+// limiteur, l'anti-doublon et la validation stricte ci-dessous (il ne fait qu'ajouter un lead
+// "New", aucune donnee n'est jamais renvoyee).
+const THERMOS_FIELD_LABELS = {
+  service: 'Service', service_choisi: 'Service choisi', type_propriete: 'Type de propriété',
+  type_batiment: 'Type de bâtiment', nombre_thermos: 'Nombre de thermos', raison: 'Raison',
+  autres_renovations: 'Autres rénovations', seul_decideur: 'Seul décideur',
+  date_installation: "Date d'installation", numero_facture: 'No de facture', message: 'Message',
+  page_url: 'Page',
+};
+router.post('/webhooks/thermos-leads', webhookLimiter, (req, res) => {
+  const configuredSecret = process.env.THERMOS_WEBHOOK_SECRET;
+  if (configuredSecret) {
+    const providedSecret = req.query.key || req.headers['x-webhook-secret'];
+    if (!secretsMatch(providedSecret, configuredSecret)) {
+      return res.status(401).json({ error: 'Cle webhook invalide.' });
+    }
+  }
+  const b = req.body || {};
+  const str = (v, max) => (v == null ? '' : String(Array.isArray(v) ? v.join(', ') : v)).trim().slice(0, max || 200);
+  // Formulaire de reference : la personne referee devient le contact, le referent va en notes.
+  const isReferral = !!str(b.ref_telephone) && !!str(b.ref_prenom);
+  const firstName = str(isReferral ? b.ref_prenom : (b.prenom || b.firstName), 80);
+  const lastName  = str(isReferral ? b.ref_nom : (b.nom || b.lastName), 80);
+  const phone     = str(isReferral ? b.ref_telephone : (b.telephone || b.phone), 40);
+  const email     = str(isReferral ? b.ref_courriel : (b.courriel || b.email), 160) || null;
+  const city      = str(isReferral ? b.ref_ville : (b.ville || b.city), 120) || null;
+  const address   = isReferral ? null : (str(b.adresse || b.address, 200) || null);
+  const digits = phone.replace(/\D/g, '');
+  if (!firstName || digits.length < 10 || digits.length > 15) {
+    return res.status(400).json({ error: 'prenom et telephone valides requis.' });
+  }
+  const recentDup = get(
+    `SELECT id FROM ad_leads
+     WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,'-',''),' ',''),'(',''),')','') = ?
+       AND created_at >= datetime('now', '-5 minutes')
+     ORDER BY created_at DESC LIMIT 1`,
+    [digits]
+  );
+  if (recentDup) return res.status(200).json({ message: 'Lead deja recu (doublon evite).', id: recentDup.id });
+
+  const details = Object.keys(THERMOS_FIELD_LABELS)
+    .filter(k => k !== 'message' && str(b[k]))
+    .map(k => `${THERMOS_FIELD_LABELS[k]}: ${str(b[k], 300)}`);
+  const noteParts = [];
+  if (isReferral) {
+    const refBy = [str(b.prenom, 80), str(b.nom, 80)].filter(Boolean).join(' ');
+    noteParts.push(`Référé par: ${refBy || '—'}${str(b.telephone) ? ' — ' + str(b.telephone, 40) : ''}${str(b.courriel) ? ' — ' + str(b.courriel, 160) : ''}`);
+  }
+  if (str(b.message)) noteParts.push(str(b.message, 2000));
+  try {
+    const id = insertAdLead({
+      brand: 'thermos', source: 'Thermos Horizon', firstName, lastName: lastName || '—', phone,
+      email, notes: noteParts.join('\n\n') || null, createdBy: null, city, address,
+      buildingType: str(b.type_propriete || b.type_batiment, 120) || null,
+      projectDetails: details.join('\n') || null, formSource: str(b.source, 60) || 'thermoshorizon.com',
+    });
+    return res.status(201).json({ message: 'Lead created.', id });
+  } catch (e) {
+    console.error('webhook thermos-leads error', e);
     return res.status(500).json({ error: 'Insertion echouee.' });
   }
 });
@@ -1390,6 +1468,8 @@ function sendAppointmentSetIntro(adLeadId, { closerFirstName } = {}) {
   try {
     const l = get('SELECT * FROM ad_leads WHERE id = ?', [adLeadId]);
     if (!l || l.intro_sent_at) return;
+    // Message au nom de Calfeutrage Protek (RBQ, OPC, site web) : jamais aux leads Thermos Horizon.
+    if (l.brand === 'thermos') return;
     if (!l.phone && !l.email) return;
     const msg = buildAppointmentSetMessage({
       firstName: l.first_name, apptDate: l.appt_date, apptHour: l.appt_hour, closerFirstName,
@@ -2768,14 +2848,14 @@ router.get('/leads-crm/ad-spend', requireAuth, requireQueueOwner, (req, res) => 
   return res.json(query('SELECT * FROM ad_spend ORDER BY spend_date DESC, created_at DESC'));
 });
 router.post('/leads-crm/ad-spend', requireAuth, requireQueueOwner, (req, res) => {
-  const { spendDate, amount, platform, notes } = req.body;
+  const { spendDate, amount, platform, notes, brand } = req.body;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(spendDate || ''))) return res.status(400).json({ error: 'Date invalide (AAAA-MM-JJ).' });
   const amt = parseFloat(amount);
   if (!isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'Montant invalide.' });
   const plat = AD_SPEND_PLATFORMS.includes(platform) ? platform : 'Autre';
   const id = uuid();
-  run('INSERT INTO ad_spend (id, spend_date, amount, platform, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)',
-    [id, spendDate, Math.round(amt * 100) / 100, plat, notes ? String(notes).trim() || null : null, req.user.id]);
+  run('INSERT INTO ad_spend (id, spend_date, amount, platform, notes, created_by, brand) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, spendDate, Math.round(amt * 100) / 100, plat, notes ? String(notes).trim() || null : null, req.user.id, brand === 'thermos' ? 'thermos' : 'protek']);
   return res.status(201).json({ message: 'Dépense ajoutée.', id });
 });
 router.delete('/leads-crm/ad-spend/:id', requireAuth, requireQueueOwner, (req, res) => {
