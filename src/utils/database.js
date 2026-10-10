@@ -645,6 +645,12 @@ function migrateNewColumns() {
   // presentation (SMS + courriel, voir utils/appointmentSetMessage.js). Sert de garde anti-doublon :
   // un lead ne recoit ce message qu'UNE fois, meme s'il est rebooke ou repasse par ce statut.
   { table: 'ad_leads', column: 'intro_sent_at', def: 'TEXT' },
+  // Thermos Horizon (sous-division de Groupe Protek, demande utilisateur 2026-10-10) : les leads
+  // du site thermoshorizon.com arrivent dans la meme Queue, mais dans un onglet "Thermos" separe.
+  // 'protek' (defaut, tous les leads existants) ou 'thermos'. Meme etiquette sur les depenses pub
+  // pour que Queue > Performance calcule le ROAS de chaque marque separement.
+  { table: 'ad_leads', column: 'brand', def: "TEXT DEFAULT 'protek'" },
+  { table: 'ad_spend', column: 'brand', def: "TEXT DEFAULT 'protek'" },
   // Mini-app "Soumission Calfeutrage" (2026-09-29, suite) : iOS ignore completement les champs
   // icon/badge du payload push et affiche TOUJOURS l'icone de l'app installee sur l'ecran
   // d'accueil — impossible de differencier le logo par notification au sein d'UNE SEULE app.
