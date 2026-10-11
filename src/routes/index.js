@@ -2269,6 +2269,13 @@ router.get('/poll', requireAuth, (req, res) => {
        ORDER BY m.created_at ASC`,
       [since, since]
     );
+    // Canal "Cost" (demandes de prix) : jamais envoye a un setter, meme via le poll (demande
+    // utilisateur 2026-10-11 : les setters ne doivent ni voir ni acceder a la section Cost).
+    // Voir aussi getChatChannels/getChatMessages/postChatMessage (chat.controller.js).
+    if (role === 'setter') {
+      const costCh = get(`SELECT id FROM chat_channels WHERE name = 'Cost'`);
+      newChatMessages = newChatMessages.filter(m => m.type !== 'cost_request' && (!costCh || m.channel_id !== costCh.id));
+    }
     newChatMessages.forEach(m => {
       try { m.photo_urls = JSON.parse(m.photo_urls || '[]'); } catch { m.photo_urls = []; }
     });
