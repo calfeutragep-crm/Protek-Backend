@@ -2893,6 +2893,76 @@ router.post('/leads-crm/ad-spend', requireAuth, requireQueueOwner, (req, res) =>
     [id, spendDate, Math.round(amt * 100) / 100, plat, notes ? String(notes).trim() || null : null, req.user.id, brand === 'thermos' ? 'thermos' : 'protek']);
   return res.status(201).json({ message: 'Dépense ajoutée.', id });
 });
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// GOOGLE ADS → Queue > Performance (demande utilisateur 2026-10-12 : "mon CRM connecte a Google Ads
+// pour voir le ad spend par semaine, par mois, vs combien de deals closes"). Pas d'API Google Ads
+// (exige un developer token approuve par Google + OAuth) : un SCRIPT Google Ads, colle une fois par
+// l'admin dans son compte (Outils > Scripts) et planifie chaque jour, envoie la depense par
+// campagne et par jour ici. La cle du script est generee par le CRM (bouton dans Performance) et
+// stockee dans app_settings — aucun secret a saisir a la main sur Railway.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+function getSetting(key) { const r = get('SELECT value FROM app_settings WHERE key = ?', [key]); return r ? r.value : null; }
+function setSetting(key, value) {
+  if (get('SELECT key FROM app_settings WHERE key = ?', [key])) run("UPDATE app_settings SET value = ?, updated_at = datetime('now') WHERE key = ?", [value, key]);
+  else run('INSERT INTO app_settings (key, value) VALUES (?, ?)', [key, value]);
+}
+function googleAdsStatus() {
+  let last = null;
+  try { last = JSON.parse(getSetting('google_ads_last_sync') || 'null'); } catch { last = null; }
+  const h = get(`SELECT COUNT(*) AS n, MIN(spend_date) AS first, MAX(spend_date) AS lastDate FROM ad_spend WHERE source = 'google_ads'`) || {};
+  return { hasKey: !!getSetting('google_ads_key'), key: getSetting('google_ads_key'), lastSync: last,
+    history: { rows: h.n || 0, from: h.first || null, to: h.lastDate || null } };
+}
+router.get('/leads-crm/google-ads', requireAuth, requireQueueOwner, (req, res) => res.json(googleAdsStatus()));
+// (Re)genere la cle du script. Regenerer coupe l'ancien script (il faudra recoller le nouveau).
+router.post('/leads-crm/google-ads/key', requireAuth, requireQueueOwner, (req, res) => {
+  setSetting('google_ads_key', require('crypto').randomBytes(24).toString('hex'));
+  return res.json(googleAdsStatus());
+});
+// Campagne -> marque : une campagne dont le nom contient "thermo" (ex: "Thermos Horizon - Recherche")
+// est comptee pour Thermos Horizon, toutes les autres pour Calfeutrage Protek.
+function googleAdsBrand(campaignName) { return /thermo/i.test(String(campaignName || '')) ? 'thermos' : 'protek'; }
+router.post('/webhooks/google-ads-spend', webhookLimiter, (req, res) => {
+  const configured = getSetting('google_ads_key');
+  if (!configured) return res.status(503).json({ error: 'Synchro Google Ads non configuree.' });
+  if (!secretsMatch(req.query.key || req.headers['x-webhook-secret'], configured)) {
+    return res.status(401).json({ error: 'Cle invalide.' });
+  }
+  const b = req.body || {};
+  const customerId = String(b.customerId || '').replace(/[^0-9-]/g, '').slice(0, 20) || 'compte';
+  const rows = Array.isArray(b.rows) ? b.rows.slice(0, 1000) : [];
+  let upserted = 0, removed = 0, skipped = 0;
+  rows.forEach(r => {
+    const date = String(r.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { skipped++; return; }
+    const campaignId = String(r.campaignId || '').replace(/[^0-9]/g, '').slice(0, 30);
+    const campaignName = String(r.campaignName || '').slice(0, 200);
+    const amount = Math.round((Number(r.costMicros) || 0) / 10000) / 100;
+    const key = `gads:${customerId}:${campaignId || campaignName}:${date}`;
+    const existing = get('SELECT id FROM ad_spend WHERE external_key = ?', [key]);
+    if (!(amount > 0)) {
+      if (existing) { run('DELETE FROM ad_spend WHERE id = ?', [existing.id]); removed++; }
+      return;
+    }
+    const clicks = parseInt(r.clicks, 10) || 0, impressions = parseInt(r.impressions, 10) || 0;
+    const conversions = Math.round((Number(r.conversions) || 0) * 100) / 100;
+    if (existing) {
+      run(`UPDATE ad_spend SET spend_date = ?, amount = ?, notes = ?, brand = ?, clicks = ?, impressions = ?, conversions = ? WHERE id = ?`,
+        [date, amount, campaignName || null, googleAdsBrand(campaignName), clicks, impressions, conversions, existing.id]);
+    } else {
+      run(`INSERT INTO ad_spend (id, spend_date, amount, platform, notes, created_by, brand, source, external_key, clicks, impressions, conversions)
+           VALUES (?, ?, ?, 'Google Ads', ?, NULL, ?, 'google_ads', ?, ?, ?, ?)`,
+        [uuid(), date, amount, campaignName || null, googleAdsBrand(campaignName), key, clicks, impressions, conversions]);
+    }
+    upserted++;
+  });
+  setSetting('google_ads_last_sync', JSON.stringify({
+    at: new Date().toISOString(), account: String(b.accountName || '').slice(0, 120), customerId,
+    currency: String(b.currency || '').slice(0, 5), rows: rows.length, upserted, removed, skipped,
+  }));
+  return res.json({ ok: true, upserted, removed, skipped });
+});
+
 router.delete('/leads-crm/ad-spend/:id', requireAuth, requireQueueOwner, (req, res) => {
   const row = get('SELECT id FROM ad_spend WHERE id = ?', [req.params.id]);
   if (!row) return res.status(404).json({ error: 'Dépense introuvable.' });
