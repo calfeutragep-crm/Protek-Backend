@@ -483,6 +483,12 @@ function createSchema() {
     -- Depenses publicitaires (demande utilisateur 2026-10-01 : suivre la pub vs ce qui a ete
     -- ferme, par semaine et par mois, dans la Queue). Saisie manuelle par l'admin (aucune
     -- plateforme pub connectee) : une ligne = un montant depense a une date, sur une plateforme.
+    -- Reglages cle/valeur de l'application (ex: cle du script Google Ads, derniere synchro).
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS ad_spend (
       id TEXT PRIMARY KEY,
       spend_date TEXT NOT NULL,
@@ -651,6 +657,15 @@ function migrateNewColumns() {
   // pour que Queue > Performance calcule le ROAS de chaque marque separement.
   { table: 'ad_leads', column: 'brand', def: "TEXT DEFAULT 'protek'" },
   { table: 'ad_spend', column: 'brand', def: "TEXT DEFAULT 'protek'" },
+  // Synchro Google Ads (demande utilisateur 2026-10-12) : depenses importees automatiquement par
+  // le script Google Ads (POST /webhooks/google-ads-spend). source='google_ads' + external_key
+  // unique "gads:<compte>:<campagne>:<date>" pour mettre a jour la meme ligne a chaque synchro
+  // au lieu de la dupliquer. Les depenses saisies a la main restent source='manual'.
+  { table: 'ad_spend', column: 'source', def: "TEXT DEFAULT 'manual'" },
+  { table: 'ad_spend', column: 'external_key', def: 'TEXT' },
+  { table: 'ad_spend', column: 'clicks', def: 'INTEGER' },
+  { table: 'ad_spend', column: 'impressions', def: 'INTEGER' },
+  { table: 'ad_spend', column: 'conversions', def: 'REAL' },
   // Mini-app "Soumission Calfeutrage" (2026-09-29, suite) : iOS ignore completement les champs
   // icon/badge du payload push et affiche TOUJOURS l'icone de l'app installee sur l'ecran
   // d'accueil — impossible de differencier le logo par notification au sein d'UNE SEULE app.
