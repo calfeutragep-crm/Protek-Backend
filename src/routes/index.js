@@ -146,6 +146,25 @@ function requireQueueOwner(req, res, next) {
   }
   next();
 }
+// Demande utilisateur 2026-10-12 : le team leader de vente a acces a la Queue (leads marketing)
+// pour se setter des RDV a partir des leads — statut, fiche, notes, ajout de lead et booking au
+// calendrier d'un closer (ou au sien). Les depenses pub (Queue > Performance) restent owner-only
+// (requireQueueOwner), comme toutes les donnees de revenu cachees a ce role.
+function requireQueueAccess(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'team_leader_vente') {
+    return res.status(403).json({ error: 'Section Queue réservée au owner et au team leader de vente.' });
+  }
+  next();
+}
+// Lecture des leads marketing + notes + ajout manuel : equipe Leads CRM + team leader de vente.
+function requireLeadsCrmOrQueueAccess(req, res, next) {
+  const r = req.user.role;
+  if (r !== 'owner' && r !== 'lead_marketing' && r !== 'lead_closer' && r !== 'team_leader_vente') {
+    return res.status(403).json({ error: 'Access restricted to the Leads CRM team.' });
+  }
+  next();
+}
 function requireD2DOnly(req, res, next) {
   const r = req.user.role;
   if (r === 'lead_marketing' || r === 'lead_closer') {
@@ -1076,7 +1095,7 @@ router.delete('/push/subscribe', requireAuth, (req, res) => {
   return res.json({ message: 'Unsubscribed.' });
 });
 
-router.get('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, (req, res) => {
+router.get('/leads-crm/leads', requireAuth, requireLeadsCrmOrQueueAccess, (req, res) => {
   const rows = query(
     `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
      FROM ad_leads l
@@ -1131,7 +1150,7 @@ function insertAdLead({
       return id;
 }
 
-router.post('/leads-crm/leads', requireAuth, requireLeadsCrmAccess, async (req, res) => {
+router.post('/leads-crm/leads', requireAuth, requireLeadsCrmOrQueueAccess, async (req, res) => {
   const { source, firstName, lastName, phone, email, notes, address, postalCode, city, brand } = req.body;
   if (!firstName || !lastName || !phone) {
     return res.status(400).json({ error: 'firstName, lastName, phone required.' });
@@ -1513,7 +1532,7 @@ function adLeadClosedLostSatisfied(lead, body) {
 }
 
 
-router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) => {
+router.patch('/leads-crm/leads/:id', requireAuth, requireQueueAccess, (req, res) => {
   const { id } = req.params;
   const { status, claim, apptDate, apptHour, notes, quoteImageUrls, closedLostReason, address, postalCode, city } = req.body;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
@@ -1533,7 +1552,10 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
   const sets = ["updated_at = datetime('now')"];
   const params = [];
 
-  if (claim) { sets.push('closer_id = ?'); params.push(req.user.role === 'owner' ? (req.body.closerId || req.user.id) : req.user.id); }
+  // Un lead deja booke (RDV au calendrier d'un closer) garde son closer : le "claim" d'un
+  // deplacement dans le kanban ne doit pas l'ecraser par l'id de celui qui deplace la carte
+  // (sinon les stats de closing par closer de Queue > Performance etaient faussees).
+  if (claim && !lead.appointment_id) { sets.push('closer_id = ?'); params.push((req.user.role === 'owner' || req.user.role === 'team_leader_vente') ? (req.body.closerId || req.user.id) : req.user.id); }
   if (!lead.contacted_at && (status === 'Contacted' || apptDate)) {
     sets.push('contacted_at = ?'); params.push(new Date().toISOString());
   }
@@ -1641,7 +1663,7 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueOwner, (req, res) 
 // timestamp, et lui seul, que le verrou de statut ci-dessus consulte. Tant que la validation
 // echoue, on sauvegarde quand meme les reponses fournies (permet un remplissage progressif
 // pendant l'appel) mais qualification_completed_at reste NULL — le lead reste bloque.
-router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireQueueOwner, (req, res) => {
+router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireQueueAccess, (req, res) => {
   const { id } = req.params;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
@@ -1712,7 +1734,7 @@ router.patch('/leads-crm/leads/:id/qualification', requireAuth, requireQueueOwne
 // meme convention que referral_leads.lead_id/appointment_id) pour que PATCH /appointments/:id
 // puisse resynchroniser automatiquement le statut du lead marketing quand le closer ferme le
 // rendez-vous (Closed Won/Closed Lost — voir plus bas).
-router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, res) => {
+router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueAccess, (req, res) => {
   const { id } = req.params;
   const lead = get('SELECT * FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
@@ -1764,18 +1786,22 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
     }
     return res.status(200).json({ message: 'Rendez-vous reprogrammé.', leadId: existingAppt.lead_id, appointmentId: existingAppt.id });
   }
+  // RDV booke par le team leader de vente depuis la Queue : il en est le setter (credit RDV,
+  // classement, commissions setter) — demande 2026-10-12 "se setter des RDV qui proviennent des
+  // leads". Booke par l'owner : aucun setter, comme avant.
+  const bookedBySetter = req.user.role === 'team_leader_vente' ? req.user.id : null;
   const leadId = uuid();
   run(
     `INSERT INTO leads (id, first_name, last_name, phone, email, address, city, postal, notes, setter_id, closer_id, status)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')`,
     [leadId, lead.first_name || '', lead.last_name || '', lead.phone, lead.email, finalAddress, finalCity, finalPostal,
-     `${LABEL_LEADS} ${lead.notes || ''}`.trim(), null, closerId]
+     `${LABEL_LEADS} ${lead.notes || ''}`.trim(), bookedBySetter, closerId]
   );
   const apptId = uuid();
   run(
     `INSERT INTO appointments (id, lead_id, setter_id, closer_id, appt_date, appt_hour, status, notes)
      VALUES (?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
-    [apptId, leadId, null, closerId, apptDate, finalHour, `${LABEL_LEADS} suivi lead marketing`]
+    [apptId, leadId, bookedBySetter, closerId, apptDate, finalHour, `${LABEL_LEADS} suivi lead marketing`]
   );
   // Meme progression automatique que le PATCH classique (voir plus haut) : booker un RDV fait
   // toujours avancer le lead vers "Appointment Set", sauf s'il est deja dans un etat final.
@@ -1793,7 +1819,8 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
   const closerName = `${closer.first_name} ${closer.last_name}`;
   notifyUser(closerId, `📅 ${LABEL_LEADS} Nouveau RDV: ${leadName} le ${apptDate}`,
     { title: `📅 Nouveau RDV ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
-  notifyRole('owner', `📅 ${LABEL_LEADS} RDV booké pour ${closerName}: ${leadName} le ${apptDate}`,
+  const byWho = req.user.role === 'team_leader_vente' ? ` (par ${req.user.first_name || 'team leader'})` : '';
+  notifyRole('owner', `📅 ${LABEL_LEADS} RDV booké pour ${closerName}${byWho}: ${leadName} le ${apptDate}`,
     { title: `📅 RDV booké ${LABEL_LEADS}`, body: `${leadName} — ${apptDate}`, url: '/' });
   if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
   // Message de presentation au client (SMS + courriel) — voir sendAppointmentSetIntro.
@@ -1805,7 +1832,7 @@ router.post('/leads-crm/leads/:id/book', requireAuth, requireQueueOwner, (req, r
 // ── Notes horodatees (Leads CRM) — historique append-only distinct du champ ad_leads.notes
 // (texte libre, ecrase a chaque PATCH ci-dessus). Une entree n'est jamais modifiee ni supprimee
 // une fois creee : c'est un journal de suivi (avant/apres RDV, a n'importe quelle etape).
-router.get('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmAccess, (req, res) => {
+router.get('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmOrQueueAccess, (req, res) => {
   const { id } = req.params;
   const lead = get('SELECT id FROM ad_leads WHERE id = ?', [id]);
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
@@ -1824,7 +1851,7 @@ router.get('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmAccess, (re
   return res.json(rows);
 });
 
-router.post('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmAccess, (req, res) => {
+router.post('/leads-crm/leads/:id/notes', requireAuth, requireLeadsCrmOrQueueAccess, (req, res) => {
   const { id } = req.params;
   const { body } = req.body || {};
   if (!body || !String(body).trim()) return res.status(400).json({ error: 'body required.' });
@@ -2299,7 +2326,7 @@ router.get('/poll', requireAuth, (req, res) => {
   }
   let newAdLeads = [];
   let newAdLeadCostRequests = [];
-  if (role === 'owner' || role === 'lead_marketing' || role === 'lead_closer') {
+  if (role === 'owner' || role === 'lead_marketing' || role === 'lead_closer' || role === 'team_leader_vente') {
     newAdLeads = query(
       `SELECT l.*, c.first_name || ' ' || c.last_name AS closer_name
        FROM ad_leads l
@@ -2308,7 +2335,8 @@ router.get('/poll', requireAuth, (req, res) => {
        ORDER BY l.created_at DESC`,
       [since]
     );
-    newAdLeadCostRequests = query(
+    // Team leader de vente : leads de la Queue seulement, jamais les demandes de prix (Cost).
+    if (role !== 'team_leader_vente') newAdLeadCostRequests = query(
       `SELECT cr.*, c.first_name || ' ' || c.last_name AS closer_name
        FROM ad_lead_cost_requests cr
        LEFT JOIN users c ON cr.closer_id = c.id
