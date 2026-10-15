@@ -651,6 +651,11 @@ function migrateNewColumns() {
   // presentation (SMS + courriel, voir utils/appointmentSetMessage.js). Sert de garde anti-doublon :
   // un lead ne recoit ce message qu'UNE fois, meme s'il est rebooke ou repasse par ce statut.
   { table: 'ad_leads', column: 'intro_sent_at', def: 'TEXT' },
+  // Message de referencement (2026-10-15) : envoye seulement au clic "Closed Won" (RDV ou Queue),
+  // plus a la creation du deal. Horodatage anti-doublon sur les deux fiches (un client booke depuis
+  // la Queue a une ligne leads ET une ligne ad_leads) — voir sendReferralMessageOnce (routes).
+  { table: 'leads', column: 'referral_sent_at', def: 'TEXT' },
+  { table: 'ad_leads', column: 'referral_sent_at', def: 'TEXT' },
   // Thermos Horizon (sous-division de Groupe Protek, demande utilisateur 2026-10-10) : les leads
   // du site thermoshorizon.com arrivent dans la meme Queue, mais dans un onglet "Thermos" separe.
   // 'protek' (defaut, tous les leads existants) ou 'thermos'. Meme etiquette sur les depenses pub
@@ -678,6 +683,11 @@ function migrateNewColumns() {
   { table: 'push_subscriptions', column: 'app', def: "TEXT NOT NULL DEFAULT 'main'" },
   ];
   let changed = false;
+  // Backfill unique (2026-10-15) : jusqu'ici le message de referencement partait a la creation du
+  // deal. Tous les clients qui ont DEJA un deal l'ont donc deja recu -> on les marque comme
+  // "envoye" au moment ou la colonne est creee, pour qu'un futur clic Closed Won sur un vieux
+  // dossier ne leur renvoie jamais une 2e fois. Ne roule qu'une seule fois (colonne absente).
+  const needsReferralBackfill = !columnExists('leads', 'referral_sent_at');
   migrations.forEach(({ table, column, def }) => {
     if (!columnExists(table, column)) {
       db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
@@ -685,6 +695,17 @@ function migrateNewColumns() {
       changed = true;
     }
   });
+  if (needsReferralBackfill) {
+    db.run(`UPDATE leads SET referral_sent_at = 'avant-2026-10-15'
+            WHERE referral_sent_at IS NULL AND id IN (
+              SELECT a.lead_id FROM appointments a JOIN deals d ON d.appointment_id = a.id WHERE a.lead_id IS NOT NULL)`);
+    db.run(`UPDATE ad_leads SET referral_sent_at = 'avant-2026-10-15'
+            WHERE referral_sent_at IS NULL AND (
+              id IN (SELECT ad_lead_id FROM deals WHERE ad_lead_id IS NOT NULL)
+              OR appointment_id IN (SELECT appointment_id FROM deals WHERE appointment_id IS NOT NULL))`);
+    console.log('✓ Migration: backfill referral_sent_at (clients ayant deja un deal)');
+    changed = true;
+  }
   if (changed) saveDb();
 }
 
