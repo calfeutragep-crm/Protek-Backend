@@ -549,6 +549,37 @@ const AD_LEAD_TO_APPT_STATUS = {
   'Closed Won': 'Closed Won', 'Closed Lost': 'Closed Lost',
 };
 
+// Message de referencement (SMS + courriel, texte dans utils/dealClosedMessage.js) envoye au client
+// UNIQUEMENT au clic "Closed Won" — sur la fiche RDV (PATCH /appointments/:id) ou dans la Queue
+// (PATCH /leads-crm/leads/:id). Demande utilisateur 2026-10-15 ; avant, il partait a chaque
+// creation de deal (y compris "Nouveau deal" sans RDV). Une seule fois par client : horodatage
+// referral_sent_at sur la fiche leads ET la fiche ad_leads liee (un client booke depuis la Queue a
+// les deux). Coordonnees prises sur la fiche RDV (leads) en priorite, la plus a jour cote closer.
+function sendReferralMessageOnce({ leadId, adLeadId } = {}) {
+  try {
+    const lead = leadId ? get('SELECT id, first_name, last_name, phone, email, referral_sent_at FROM leads WHERE id = ?', [leadId]) : null;
+    const adLead = adLeadId ? get('SELECT id, first_name, last_name, phone, email, referral_sent_at, lead_id FROM ad_leads WHERE id = ?', [adLeadId]) : null;
+    // Fiche leads liee a un lead Queue (si on arrive depuis la Queue sans leadId).
+    const lead2 = !lead && adLead && adLead.lead_id ? get('SELECT id, first_name, last_name, phone, email, referral_sent_at FROM leads WHERE id = ?', [adLead.lead_id]) : lead;
+    if ((lead2 && lead2.referral_sent_at) || (adLead && adLead.referral_sent_at)) return;
+    const src = lead2 || adLead;
+    if (!src) return;
+    const phone = (lead2 && lead2.phone) || (adLead && adLead.phone) || null;
+    const email = (lead2 && lead2.email) || (adLead && adLead.email) || null;
+    if (!phone && !email) return;
+    const clientName = `${src.first_name || ''} ${src.last_name || ''}`.trim();
+    const now = new Date().toISOString();
+    if (lead2) run('UPDATE leads SET referral_sent_at = ? WHERE id = ?', [now, lead2.id]);
+    if (adLead) run('UPDATE ad_leads SET referral_sent_at = ? WHERE id = ?', [now, adLead.id]);
+    const { subject, body } = buildClosedWonMessage(clientName);
+    if (phone) sendSms({ to: phone, body });
+    if (email) sendEmail({ to: email, subject, text: body });
+    console.log(`[referencement] message envoye (lead ${lead2 ? lead2.id : '-'}, ad_lead ${adLead ? adLead.id : '-'})`);
+  } catch (e) {
+    console.error('[referencement] envoi echoue:', e.message);
+  }
+}
+
 router.patch('/appointments/:id', requireAuth, requireD2DOnly, (req, res) => {
   const { id } = req.params;
   const {
@@ -616,6 +647,11 @@ const sets = [];
     }
     const deal = get('SELECT * FROM deals WHERE appointment_id = ?', [id]);
     if (deal) createTicketFromDeal(deal);
+  }
+  // Clic "Closed Won" sur la fiche RDV (vrai changement de statut) -> message de referencement.
+  if (status === 'Closed Won' && appt.status !== 'Closed Won') {
+    const linkedForReferral = get('SELECT id FROM ad_leads WHERE appointment_id = ?', [id]);
+    sendReferralMessageOnce({ leadId: appt.lead_id, adLeadId: linkedForReferral ? linkedForReferral.id : null });
   }
   // Sync retour vers le Leads CRM (Queue, owner-only) — demande utilisateur 2026-09-15 : quand
   // le closer/team_leader_vente ferme (won OU perdu) un RDV qui a ete booke depuis un lead
@@ -867,9 +903,9 @@ router.post('/deals', requireAuth, requireDealCreateAccess, (req, res) => {
   // (pas de await) — un souci Twilio/Resend ne doit jamais retarder ou faire echouer la
   // creation du deal cote closer ; chaque util est deja best-effort de son cote (no-op si
   // les cles TWILIO_*/RESEND_API_KEY ne sont pas configurees sur Railway).
-  const { subject: closedWonSubject, body: closedWonBody } = buildClosedWonMessage(clientName);
-  if (phone) sendSms({ to: phone, body: closedWonBody });
-  if (email) sendEmail({ to: email, subject: closedWonSubject, text: closedWonBody });
+  // 2026-10-15 : le message de referencement N'EST PLUS envoye ici (creation du deal) — demande
+  // utilisateur "envoye seulement quand quelqu'un clique sur Closed Won". Voir
+  // sendReferralMessageOnce, appele depuis PATCH /appointments/:id et PATCH /leads-crm/leads/:id.
 
   return res.status(201).json({ message: 'Deal created.', id: dealId });
 });
@@ -1364,17 +1400,58 @@ router.post('/webhooks/twilio/sms-inbound', webhookLimiter, (req, res) => {
   const from = req.body.From;
   const body = req.body.Body || '';
   const forwardTo = process.env.OWNER_CELL_NUMBER;
-  // Jamais de boucle : si c'est le cellulaire du owner lui-meme qui ecrit au numero d'affaires
-  // (ex. il repond par erreur au SMS transfere), on ne le lui renvoie pas.
-  const isOwnerItself = forwardTo && digitsOnly(from).slice(-10) === digitsOnly(forwardTo).slice(-10);
-  if (forwardTo && from && !isOwnerItself) {
-    const name = findContactNameByPhone(from);
-    const who = name ? `${name} (${from})` : from;
-    sendSms({ to: forwardTo, body: `Reponse SMS de ${who} :\n${body}` });
-    console.log(`[twilio] reponse SMS de ${from} transferee au owner`);
+  res.status(200).send('<Response></Response>');
+  if (!forwardTo || !from) return;
+  const isOwnerItself = digitsOnly(from).slice(-10) === digitsOnly(forwardTo).slice(-10);
+  if (isOwnerItself) {
+    // Le owner repond depuis son cell au numero d'affaires -> relaye au client (voir ci-dessous).
+    relayOwnerReply(forwardTo, body).catch(e => console.error('[twilio] relais owner echoue:', e.message));
+    return;
   }
-  return res.status(200).send('<Response></Response>');
+  const name = findContactNameByPhone(from);
+  const who = name ? `${name} (${from})` : from;
+  // Memorise le dernier client qui a ecrit : une reponse simple du owner lui sera envoyee.
+  try { setSetting('sms_relay_last_from', from); } catch (e) { console.error('[twilio] memo dernier client:', e.message); }
+  sendSms({ to: forwardTo, body: `Reponse SMS de ${who} :\n${body}\n\n↩ Reponds ici pour lui repondre` });
+  console.log(`[twilio] reponse SMS de ${from} transferee au owner`);
 });
+
+// Reponse du owner (2026-10-15, demande "je veux pouvoir repondre aux gens a partir de mon
+// telephone") : quand Heisenberg repond depuis son cell au SMS transfere, son texte part au client
+// DEPUIS le numero d'affaires (TWILIO_FROM_NUMBER), donc le client voit la reponse dans la meme
+// conversation. Destinataire :
+//  - par defaut, le DERNIER client qui a ecrit (app_settings.sms_relay_last_from) ;
+//  - ou un autre client en commencant le texto par son numero suivi de ":" (ex. "5145551234: Oui
+//    je peux passer demain"), utile si deux clients ecrivent en meme temps.
+// Une courte confirmation revient toujours au owner (a qui c'est parti, ou l'echec) pour qu'il ne
+// reponde jamais a la mauvaise personne sans le savoir.
+const OWNER_REPLY_TARGET_RE = /^\s*\+?1?[\s.-]*\(?(\d{3})\)?[\s.-]*(\d{3})[\s.-]*(\d{4})\s*:\s*([\s\S]+)$/;
+async function relayOwnerReply(ownerCell, rawBody) {
+  let text = String(rawBody || '').trim();
+  let to = null;
+  const m = OWNER_REPLY_TARGET_RE.exec(text);
+  if (m) {
+    to = `+1${m[1]}${m[2]}${m[3]}`;
+    text = m[4].trim();
+  } else {
+    to = getSetting('sms_relay_last_from');
+  }
+  if (!to) {
+    await sendSms({ to: ownerCell, body: "Aucun client recent a qui repondre. Commence ton texto par le numero du client, ex. \"5145551234: ton message\"." });
+    return;
+  }
+  if (!text) return;
+  const name = findContactNameByPhone(to);
+  const who = name ? `${name} (${to})` : to;
+  const r = await sendSms({ to, body: text });
+  if (r && r.ok) {
+    if (m) { try { setSetting('sms_relay_last_from', to); } catch (e) { /* ignore */ } }
+    await sendSms({ to: ownerCell, body: `✓ Envoye a ${who}` });
+    console.log(`[twilio] reponse du owner relayee a ${to}`);
+  } else {
+    await sendSms({ to: ownerCell, body: `✗ Echec d'envoi a ${who} — reessaie ou appelle le client.` });
+  }
+}
 
 // POST /webhooks/twilio/voice-forward — recu par Twilio des qu'un client appelle le numero
 // d'affaires : redirige l'appel vers le cellulaire de Heisenberg. Meme protection que ci-dessus.
@@ -1712,6 +1789,10 @@ router.patch('/leads-crm/leads/:id', requireAuth, requireQueueAccess, (req, res)
     if (lead.ghl_contact_id) moveOpportunityToConfirmation(lead.ghl_contact_id);
   }
   // Lead marketing ferme (gagne ou perdu) — marketing (a paye pour ce lead) + owner veulent savoir.
+  // Clic "Closed Won" dans la Queue -> message de referencement (une seule fois par client).
+  if (status === 'Closed Won' && lead.status !== 'Closed Won') {
+    sendReferralMessageOnce({ leadId: lead.lead_id || null, adLeadId: id });
+  }
   const CLOSED_TERMINAL_STATUSES = ['Closed Won', 'Closed Lost', 'No Show'];
   if (status && CLOSED_TERMINAL_STATUSES.includes(status) && lead.status !== status) {
     const verb = status === 'Closed Won' ? 'fermé' : (status === 'No Show' ? 'no-show' : 'perdu');
