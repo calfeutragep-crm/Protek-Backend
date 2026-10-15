@@ -1321,6 +1321,75 @@ router.post('/webhooks/thermos-leads', webhookLimiter, (req, res) => {
 });
 
 // ═══════════════════════════════════════════
+// TWILIO — reponses SMS et appels entrants sur le numero d'affaires (TWILIO_FROM_NUMBER).
+// Restaure 2026-10-15 : ces deux webhooks avaient ete ajoutes le 2026-09-14 (commit f938f34) puis
+// effaces quelques heures plus tard par erreur (commit 99b69f5 "Add Referencement routes", qui a
+// remplace routes/index.js par une version anterieure). Depuis, Twilio appelait une route
+// inexistante et les reponses des leads au SMS automatique n'etaient plus transferees au
+// cellulaire de Heisenberg. Protection : secret en query string (?secret=...) dans l'URL configuree
+// cote Twilio (TWILIO_INBOUND_WEBHOOK_SECRET) ; transfert vers OWNER_CELL_NUMBER.
+// ═══════════════════════════════════════════
+function digitsOnly(v) { return String(v || '').replace(/\D/g, ''); }
+// Retrouve le nom du client a partir de son numero (10 derniers chiffres) dans les leads marketing
+// puis porte-a-porte, pour que le SMS transfere dise QUI repond. Best-effort : null si introuvable.
+function findContactNameByPhone(phone) {
+  const d10 = digitsOnly(phone).slice(-10);
+  if (d10.length < 10) return null;
+  const like = '%' + d10.slice(-4);
+  const tables = ['ad_leads', 'leads'];
+  for (const t of tables) {
+    try {
+      const rows = query(`SELECT first_name, last_name, phone FROM ${t} WHERE phone LIKE ? ORDER BY created_at DESC LIMIT 25`, [like]);
+      const hit = rows.find(r => digitsOnly(r.phone).slice(-10) === d10);
+      if (hit) {
+        const name = `${hit.first_name || ''} ${hit.last_name || ''}`.trim();
+        if (name) return name;
+      }
+    } catch (e) { /* table/colonne absente : on ignore */ }
+  }
+  return null;
+}
+
+// POST /webhooks/twilio/sms-inbound — recu par Twilio des qu'une personne repond a un SMS envoye
+// depuis le numero d'affaires (nouveau lead, Appointment Set, referencement). Transfere le texte
+// par SMS au cellulaire de Heisenberg pour qu'il puisse repondre lui-meme. Repond toujours un
+// TwiML vide pour que Twilio n'envoie aucune reponse automatique au client.
+router.post('/webhooks/twilio/sms-inbound', webhookLimiter, (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
+  const providedSecret = req.query.secret;
+  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret)) {
+    return res.status(403).send('<Response></Response>');
+  }
+  const from = req.body.From;
+  const body = req.body.Body || '';
+  const forwardTo = process.env.OWNER_CELL_NUMBER;
+  // Jamais de boucle : si c'est le cellulaire du owner lui-meme qui ecrit au numero d'affaires
+  // (ex. il repond par erreur au SMS transfere), on ne le lui renvoie pas.
+  const isOwnerItself = forwardTo && digitsOnly(from).slice(-10) === digitsOnly(forwardTo).slice(-10);
+  if (forwardTo && from && !isOwnerItself) {
+    const name = findContactNameByPhone(from);
+    const who = name ? `${name} (${from})` : from;
+    sendSms({ to: forwardTo, body: `Reponse SMS de ${who} :\n${body}` });
+    console.log(`[twilio] reponse SMS de ${from} transferee au owner`);
+  }
+  return res.status(200).send('<Response></Response>');
+});
+
+// POST /webhooks/twilio/voice-forward — recu par Twilio des qu'un client appelle le numero
+// d'affaires : redirige l'appel vers le cellulaire de Heisenberg. Meme protection que ci-dessus.
+router.post('/webhooks/twilio/voice-forward', webhookLimiter, (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  const configuredSecret = process.env.TWILIO_INBOUND_WEBHOOK_SECRET;
+  const providedSecret = req.query.secret;
+  const forwardTo = process.env.OWNER_CELL_NUMBER;
+  if (!configuredSecret || !secretsMatch(providedSecret, configuredSecret) || !forwardTo) {
+    return res.status(200).send('<Response><Say language="fr-CA">Desole, cet appel ne peut pas etre transfere pour le moment.</Say></Response>');
+  }
+  return res.status(200).send(`<Response><Dial>${forwardTo}</Dial></Response>`);
+});
+
+// ═══════════════════════════════════════════
 // APRES-VENTE — file de demandes admin-only (owner uniquement), separee du pipeline de vente.
 // Ingeree via le formulaire calfeutrageprotek.com/apres-vente -> fonction Supabase notify-lead
 // (isAfterSales:true) -> ce webhook, jamais melangee a ad_leads/appointments. Voir memoire
